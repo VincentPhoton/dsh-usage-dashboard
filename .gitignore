@@ -7,3 +7,6 @@ lib/
 /DESIGN_NOTES.md
 /PROGRESS.md
 /LEARNINGS.md
+
+# DSH 会话运行时数据(Mnemon 记忆投影),不属于插件仓库
+.mnemon/
