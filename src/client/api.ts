@@ -61,6 +61,8 @@ const usageCache = createCache<UsageResponse>(USAGE_TTL_MS, 'dsh-usage-dashboard
 
 /** Last cached value (possibly stale), for an instant first render. */
 export const getCachedBalance = (): BalanceResponse | null => balanceCache.get()?.data ?? null
+/** When the cached balance was fetched, so day-scoped figures can be validated. */
+export const getCachedBalanceAt = (): number | null => balanceCache.get()?.at ?? null
 export const getCachedUsage = (): UsageResponse | null => usageCache.get()?.data ?? null
 /** When the cached usage was fetched, so a consumer can say how old it is. */
 export const getCachedUsageAt = (): number | null => usageCache.get()?.at ?? null

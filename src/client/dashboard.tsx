@@ -7,7 +7,7 @@
  */
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import { USAGE_WINDOW_DAYS } from '../contract.ts'
-import { fetchBalance, fetchSessionUsage, fetchUsage, getCachedBalance, getCachedUsage, getCachedUsageAt } from './api.ts'
+import { fetchBalance, fetchSessionUsage, fetchUsage, getCachedBalance, getCachedBalanceAt, getCachedUsage, getCachedUsageAt } from './api.ts'
 import { budgetSnapshot } from './budget.ts'
 import { beijingDayKey } from './cache.ts'
 import { Bars, GroupedBars, Heatmap, MODEL_COLORS, fmt, fmtCompact, fmtInt } from './charts.tsx'
@@ -883,7 +883,7 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
   // spend as today's (defense in depth on top of the cache-level same-day
   // rule — this one also covers a fetch that keeps failing all day, where
   // keeping the last number would be worse than showing "not tracked yet").
-  const [balanceAt, setBalanceAt] = useState<number | null>(cachedBalance?.at ?? null)
+  const [balanceAt, setBalanceAt] = useState<number | null>(getCachedBalanceAt())
   const [usage, setUsage] = useState<UsageData | null>(cachedUsage?.data ?? null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ kind: 'all' | 'balance' | 'usage'; error: string } | null>(null)
