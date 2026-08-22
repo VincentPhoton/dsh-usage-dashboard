@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from '../src/context.ts'
@@ -356,6 +356,55 @@ test('balance fetch handles HTTP and malformed-JSON failures', async t => {
     ok: false,
     error: '解析余额响应失败',
   })
+})
+
+test('balance delta tracker re-baselines on the first poll of a new Beijing day', async t => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const statePath = join(tmpdir(), `dsh-usage-dashboard-rollover-${process.pid}-${Date.now()}.json`)
+  const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10)
+  // A 24h shift always lands on the previous Beijing calendar day.
+  const yesterday = new Date(Date.now() - 86_400_000 + 8 * 3_600_000).toISOString().slice(0, 10)
+  const credentials: CredentialsFace = { resolve: async () => ({ value: 'test-key', source: 'test' }) }
+  const respondWith = (total: string) => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      is_available: true,
+      balance_infos: [{ currency: 'CNY', total_balance: total, granted_balance: '0', topped_up_balance: '40.00' }],
+    }), { status: 200 })) as typeof fetch
+  }
+
+  try {
+    // The service kept running overnight: yesterday's baseline is still on
+    // disk when the first poll of the new day arrives.
+    writeFileSync(statePath, JSON.stringify({ date: yesterday, total: 100, toppedUp: 40 }), 'utf8')
+
+    // First poll after midnight: no number for the new day yet — and the
+    // baseline on disk is rewritten to today, so no restart is needed.
+    respondWith('90.00')
+    assert.equal((await fetchBalance(credentials, statePath)).data?.todayConsumed, null)
+    assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), { date: today, total: 90, toppedUp: 40 })
+
+    // The next poll accounts against the NEW baseline (100 → 90 was
+    // yesterday's business; 90 → 85 belongs to today).
+    respondWith('85.00')
+    assert.deepEqual((await fetchBalance(credentials, statePath)).data?.todayConsumed, 5)
+  } finally {
+    rmSync(statePath, { force: true })
+  }
+})
+
+test('balance fetch bounds a hanging credential resolution', async () => {
+  const startedAt = Date.now()
+  const result = await fetchBalance(
+    { resolve: () => new Promise(() => {}) }, // never settles
+    undefined,
+    50,
+  )
+  assert.equal(result.ok, false)
+  assert.match(result.error ?? '', /读取 API Key 失败：超时/)
+  // The endpoint answered instead of wedging forever.
+  assert.ok(Date.now() - startedAt < 5_000)
 })
 
 test('session usage folds one session into per-model totals with a first/last active range', async () => {

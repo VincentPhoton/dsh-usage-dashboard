@@ -17,6 +17,23 @@ export interface CacheHit<T> {
   at: number
 }
 
+/**
+ * Beijing-calendar-day key ("YYYY-MM-DD") of a timestamp. The host's balance
+ * tracker re-baselines on the first poll of each Beijing day, so the client
+ * must share that day definition: a payload fetched yesterday describes
+ * *yesterday's* consumption even if its TTL has not run out yet.
+ */
+export const beijingDayKey = (ms: number): string =>
+  new Date(ms + 8 * 3_600_000).toISOString().slice(0, 10)
+
+export interface ResourceCacheOptions {
+  /** When true, `getFresh()` also refuses entries fetched on an earlier
+   *  Beijing calendar day, regardless of TTL. Day-scoped numbers (今日消耗)
+   *  then trigger a refetch on the first poll of a new day instead of being
+   *  served from a pre-midnight payload. */
+  sameDayOnly?: boolean
+}
+
 export interface ResourceCache<T> {
   /** Last cached value even when stale; null when never cached. */
   get(): CacheHit<T> | null
@@ -72,12 +89,16 @@ function persist<T>(storageKey: string, hit: CacheHit<T>): void {
   }
 }
 
-export function createCache<T>(ttlMs: number, storageKey?: string, isUsable?: (data: T) => boolean): ResourceCache<T> {
+export function createCache<T>(ttlMs: number, storageKey?: string, isUsable?: (data: T) => boolean, options?: ResourceCacheOptions): ResourceCache<T> {
   if (storageKey !== undefined) pruneOldVersions(storageKey)
   let hit: CacheHit<T> | null = storageKey === undefined ? null : loadPersisted<T>(storageKey, isUsable)
   return {
     get: () => hit,
-    getFresh: () => (hit !== null && Date.now() - hit.at < ttlMs ? hit.data : null),
+    getFresh: () => {
+      if (hit === null || Date.now() - hit.at >= ttlMs) return null
+      if (options?.sameDayOnly === true && beijingDayKey(hit.at) !== beijingDayKey(Date.now())) return null
+      return hit.data
+    },
     put: (data) => {
       hit = { data, at: Date.now() }
       if (storageKey !== undefined) persist(storageKey, hit)

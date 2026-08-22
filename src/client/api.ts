@@ -51,8 +51,13 @@ const usageIsUsable = (res: UsageResponse): boolean => {
 const balanceIsUsable = (res: BalanceResponse): boolean =>
   res.ok === true && Array.isArray(res.data?.balances)
 
-const balanceCache = createCache<BalanceResponse>(BALANCE_TTL_MS, 'dsh-usage-dashboard:balance', balanceIsUsable)
-const usageCache = createCache<UsageResponse>(USAGE_TTL_MS, 'dsh-usage-dashboard:usage', usageIsUsable)
+// `sameDayOnly` (see ./cache.ts): both payloads carry day-scoped numbers
+// (今日消耗平台核算 / summary.today). After Beijing midnight a pre-midnight
+// payload must never be served as fresh, or yesterday's spend would keep
+// showing as today's until a manual force refresh — the exact bug this
+// option removes: the first poll of a new day now refetches on its own.
+const balanceCache = createCache<BalanceResponse>(BALANCE_TTL_MS, 'dsh-usage-dashboard:balance', balanceIsUsable, { sameDayOnly: true })
+const usageCache = createCache<UsageResponse>(USAGE_TTL_MS, 'dsh-usage-dashboard:usage', usageIsUsable, { sameDayOnly: true })
 
 /** Last cached value (possibly stale), for an instant first render. */
 export const getCachedBalance = (): BalanceResponse | null => balanceCache.get()?.data ?? null

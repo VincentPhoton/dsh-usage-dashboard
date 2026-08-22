@@ -14,6 +14,11 @@ import { trackDailyConsumption } from './balance-tracker.ts'
 
 const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n))
 
+/** Upper bound for credential resolution: the endpoint must always answer so
+ *  the client's refresh never wedges on a stuck credentials service (the HTTP
+ *  call below already bounds itself via AbortSignal.timeout). */
+const CREDENTIAL_TIMEOUT_MS = 10_000
+
 function errorMessage(err: unknown): string {
   return (err as { message?: string } | null)?.message ?? String(err)
 }
@@ -22,13 +27,23 @@ function errorMessage(err: unknown): string {
  * Balance + platform-accounted daily consumption.
  *
  * `statePath` is injectable so tests can point the balance-delta tracker at a
- * temp file instead of the real `~/.dsh` state.
+ * temp file instead of the real `~/.dsh` state; `credentialTimeoutMs` is
+ * injectable so tests can exercise the resolution guard without waiting out
+ * the production timeout.
  */
-export async function fetchBalance(credentials: CredentialsFace | undefined, statePath?: string): Promise<BalanceResponse> {
+export async function fetchBalance(credentials: CredentialsFace | undefined, statePath?: string, credentialTimeoutMs?: number): Promise<BalanceResponse> {
+  const resolveTimeoutMs = credentialTimeoutMs ?? CREDENTIAL_TIMEOUT_MS
   if (credentials === undefined) return { ok: false, error: '凭证服务不可用' }
   let cred: { value: string } | undefined
   try {
-    cred = await credentials.resolve('DEEPSEEK_API_KEY')
+    cred = await Promise.race([
+      credentials.resolve('DEEPSEEK_API_KEY'),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error(`超时（${Math.round(resolveTimeoutMs / 1000)} 秒无响应）`)), resolveTimeoutMs)
+        // Never hold the process open just for this guard.
+        ;(timer as unknown as { unref?: () => void }).unref?.()
+      }),
+    ])
   } catch (err) {
     return { ok: false, error: `读取 API Key 失败：${errorMessage(err)}` }
   }

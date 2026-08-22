@@ -9,6 +9,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSPropert
 import { USAGE_WINDOW_DAYS } from '../contract.ts'
 import { fetchBalance, fetchSessionUsage, fetchUsage, getCachedBalance, getCachedUsage, getCachedUsageAt } from './api.ts'
 import { budgetSnapshot } from './budget.ts'
+import { beijingDayKey } from './cache.ts'
 import { Bars, GroupedBars, Heatmap, MODEL_COLORS, fmt, fmtCompact, fmtInt } from './charts.tsx'
 import { getComposerElement, getShellFrame } from './dom.ts'
 import { dailyUsageCsv, downloadText, exportDateStamp, fullUsageJson, modelUsageCsv } from './export.ts'
@@ -876,6 +877,13 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
   const cachedUsage = getCachedUsage()
   const cachedUsageAt = getCachedUsageAt()
   const [balance, setBalance] = useState<BalanceData | null>(cachedBalance?.data ?? null)
+  // When the shown balance was fetched. 今日消耗 is day-scoped: a payload
+  // fetched before Beijing midnight describes *yesterday*, so the render
+  // below demotes its todayConsumed to "—" instead of presenting yesterday's
+  // spend as today's (defense in depth on top of the cache-level same-day
+  // rule — this one also covers a fetch that keeps failing all day, where
+  // keeping the last number would be worse than showing "not tracked yet").
+  const [balanceAt, setBalanceAt] = useState<number | null>(cachedBalance?.at ?? null)
   const [usage, setUsage] = useState<UsageData | null>(cachedUsage?.data ?? null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ kind: 'all' | 'balance' | 'usage'; error: string } | null>(null)
@@ -1026,6 +1034,7 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
     const balanceTask = fetchBalance(force).then(res => {
       if (res.ok && res.data !== undefined) {
         setBalance(res.data)
+        setBalanceAt(Date.now())
         hadDataRef.current = true
         return null
       }
@@ -1164,6 +1173,13 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
   }
 
   const primary = balance !== null && balance.balances.length > 0 ? balance.balances[0] : null
+
+  // 今日消耗 is only meaningful from a payload fetched *today* (Beijing): a
+  // cross-day payload's number belongs to the day it was fetched on.
+  const todayConsumedShown = balance !== null && balanceAt !== null
+    && beijingDayKey(balanceAt) === beijingDayKey(Date.now())
+    ? balance.todayConsumed
+    : null
 
   // Runway: balance divided by the last 7 calendar days' average spend. Idle
   // days are included on purpose — that is the burn rate, not the busy-day rate.
@@ -1380,9 +1396,9 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
             <Stat label={t('balance.todayConsumed')}>
               <div
                 className="dq-stat-value"
-                title={balance?.todayConsumed == null ? t('balance.todayConsumedEmpty') : t('balance.todayConsumedTitle')}
+                title={todayConsumedShown == null ? t('balance.todayConsumedEmpty') : t('balance.todayConsumedTitle')}
               >
-                {balance?.todayConsumed == null ? '—' : `${fmt(balance.todayConsumed)} ${primary?.currency ?? ''}`}
+                {todayConsumedShown == null ? '—' : `${fmt(todayConsumedShown)} ${primary?.currency ?? ''}`}
               </div>
             </Stat>
           </div>
