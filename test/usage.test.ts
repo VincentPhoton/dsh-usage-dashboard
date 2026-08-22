@@ -162,6 +162,46 @@ test('usage replay aggregates totals, periods, models, sessions, and pricing pro
   assert.equal(data.pricing.splitActive, false)
 })
 
+test('subagent replay events are deduped across sessions by message id', async () => {
+  const now = localTime(20, 16)
+  const t1 = localTime(20, 10)
+  const t2 = localTime(20, 11)
+  const t3 = localTime(20, 12)
+  const logs: Record<string, SessionEventFace[]> = {
+    parent: [
+      { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+      { type: 'assistant/message', time: t1, data: { message: { id: 'msg-a' }, usage: { inputTokens: 1_000, outputTokens: 100 } } },
+      { type: 'assistant/message', time: t2, data: { message: { id: 'msg-b' }, usage: { inputTokens: 2_000, outputTokens: 200 } } },
+    ],
+    child: [
+      { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+      // The same API responses replayed inside the subagent session — without
+      // dedup these would double-count the parent's calls and tokens.
+      { type: 'assistant/message', time: t1, data: { message: { id: 'msg-a' }, usage: { inputTokens: 1_000, outputTokens: 100 } } },
+      { type: 'assistant/message', time: t2, data: { message: { id: 'msg-b' }, usage: { inputTokens: 2_000, outputTokens: 200 } } },
+      // A genuinely separate subagent call — must still be counted.
+      { type: 'assistant/message', time: t3, data: { message: { id: 'msg-c' }, usage: { inputTokens: 500, outputTokens: 50 } } },
+    ],
+  }
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ id: 'parent' }, { id: 'child' }],
+    readFrom: async (id) => ({ events: logs[id] }),
+  }
+
+  const response = await fetchUsage(persistence, now)
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  const data = response.data
+
+  assert.equal(data.totals.calls, 3, 'three unique API responses')
+  assert.deepEqual({ input: data.totals.input, output: data.totals.output }, { input: 3_500, output: 350 })
+  assert.equal(data.peakSplit.peak.calls + data.peakSplit.offPeak.calls, 3)
+  assert.deepEqual(
+    data.sessions.map(session => ({ id: session.id, calls: session.calls })),
+    [{ id: 'parent', calls: 2 }, { id: 'child', calls: 1 }],
+  )
+})
+
 test('usage replay builds consistent 7, 30, 90, and 365 day windows', async () => {
   const now = localTime(20, 16)
   const daysAgo = (days: number): number => new Date(2026, 6, 20 - days, 12, 0, 0).getTime()

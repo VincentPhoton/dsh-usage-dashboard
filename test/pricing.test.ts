@@ -82,7 +82,7 @@ test('rates switch exactly at 2026-08-17 00:00 Beijing time', () => {
     output: 6,
   })
   assert.deepEqual(ratesAt(PEAK_PRICING_FROM_MS, 'deepseek-v4-pro'), {
-    cacheHit: 0.15,
+    cacheHit: 0.3,
     input: 4.5,
     output: 13.5,
   })
@@ -91,6 +91,18 @@ test('rates switch exactly at 2026-08-17 00:00 Beijing time', () => {
     input: 3,
     output: 9,
   })
+})
+
+test('off-peak halves input/output only; cache-hit rate is unchanged', () => {
+  // Verified against the Open Platform's bill: Saturday usage is ~96% cache
+  // hits and the charged amount only matches when the cache rate stays at the
+  // peak value during off-peak hours.
+  const offPeak = ratesAt(atBeijing(8), 'deepseek-v4-flash') // 08:00 Tuesday = off-peak
+  assert.deepEqual(offPeak, { cacheHit: 0.1, input: 1.5, output: 4.5 })
+  const offPeakPro = ratesAt(atBeijing(8), 'deepseek-v4-pro')
+  assert.deepEqual(offPeakPro, { cacheHit: 0.3, input: 4.5, output: 13.5 })
+  // A weekend off-peak hour uses the same table.
+  assert.deepEqual(ratesAt(atBeijingDate(2026, 8, 22, 10), 'deepseek-v4-flash'), { cacheHit: 0.1, input: 1.5, output: 4.5 })
 })
 
 test('cost and cache-saving calculations price every token component', () => {

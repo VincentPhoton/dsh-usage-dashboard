@@ -8,7 +8,8 @@
  * Rates are CNY per 1M tokens, from DeepSeek's 2026-08-13 price announcement.
  * Peak windows are Beijing time 09:00–12:00 and 14:00–18:00 on workdays only:
  * weekends (Sat/Sun) and Chinese statutory holidays (法定节假日) are entirely
- * off-peak, and off-peak is half of peak. Usage recorded before the switch is
+ * off-peak. Off-peak halves the input/output price; the cache-hit rate is the
+ * same in both windows (see halved()). Usage recorded before the switch is
  * still costed at the old flat rates, so historical days keep the price that
  * was actually charged.
  *
@@ -34,14 +35,18 @@ const LEGACY_RATES: Record<Tier, PricingRates> = {
   flash: { cacheHit: 0.02, input: 1, output: 2 },
 }
 
-/** Peak rates from 2026-08-17; off-peak is exactly half of each. */
+/** Peak rates from 2026-08-17. Off-peak halves input/output only — the
+ *  cache-hit rate is the same in both windows (verified against the Open
+ *  Platform's actual bill: a Saturday's usage is ~96% cache-hit tokens and
+ *  only the un-halved cache rate matches the charged amount). */
 const PEAK_RATES: Record<Tier, PricingRates> = {
   pro: { cacheHit: 0.3, input: 9, output: 27 },
   flash: { cacheHit: 0.1, input: 3, output: 9 },
 }
 
+/** Off-peak = peak with input/output halved; cache-hit price is unchanged. */
 const halved = (rates: PricingRates): PricingRates => ({
-  cacheHit: rates.cacheHit / 2,
+  cacheHit: rates.cacheHit,
   input: rates.input / 2,
   output: rates.output / 2,
 })

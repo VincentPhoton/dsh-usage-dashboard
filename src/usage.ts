@@ -246,6 +246,13 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
 
   const now = new Date(nowMs)
   const dateBefore = (days: number): Date => new Date(now.getFullYear(), now.getMonth(), now.getDate() - days)
+
+  // One API response is logged once per session that replays it: the parent
+  // conversation re-records every subagent's `assistant/message` events with
+  // the same message id, so naively summing sessions multiplies each request
+  // by (1 + number of sessions containing it) — today's "calls" read ~3x the
+  // platform's request count. Dedupe by message id across all sessions.
+  const seenMessageIds = new Set<string>()
   const windowAggregates: WindowAccumulator[] = USAGE_WINDOW_DAYS.map(days => ({
     days,
     startKey: dayKeyOf(dateBefore(days - 1)),
@@ -323,7 +330,11 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
       coverage.scannedSessions += 1
       const session: SessionCost = { id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }
       const windowSessions = windowAggregates.map((): SessionCost => ({ id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }))
-      const scanned = addUsageEvent(events, (time, input, output, cache, reasoning, provider, model) => {
+      const scanned = addUsageEvent(events, (time, input, output, cache, reasoning, provider, model, messageId) => {
+        if (messageId !== undefined) {
+          if (seenMessageIds.has(messageId)) return
+          seenMessageIds.add(messageId)
+        }
         if (coverage.earliestAt === null || time < coverage.earliestAt) coverage.earliestAt = time
         if (coverage.latestAt === null || time > coverage.latestAt) coverage.latestAt = time
         const d = new Date(time)
