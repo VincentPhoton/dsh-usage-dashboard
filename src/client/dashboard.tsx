@@ -956,6 +956,55 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
     }
   }, [])
 
+  // The host keeps ONE scrollport (`[data-conversation-scroll]`) for every
+  // conversation view and preserves its scrollTop across view switches. The
+  // chat view lives at the bottom of that same scroller, so a freshly mounted
+  // dashboard would open on the 设置 card at the bottom instead of the 余额
+  // card at the top. Scroll the shared scroller to the top on mount so the
+  // tab always opens at the balance section, and re-assert it after a frame in
+  // case the host adjusts the scroll after commit.
+  //
+  // While here, also nudge the occasional white tab: mid view-switch the host
+  // can leave the conversation view area clipped (0-height, overflow hidden)
+  // until its flex layout settles. Re-asserting the scroll forces a reflow
+  // that lets the host settle that layout; stop as soon as the root paints
+  // with real size or after a short budget.
+  useLayoutEffect(() => {
+    const node = rootRef.current
+    if (node === null) return
+    const scrollerOf = (): HTMLElement | null => {
+      const scroller = node.closest<HTMLElement>('[data-conversation-scroll]')
+      if (scroller !== null) return scroller
+      let el: HTMLElement | null = node.parentElement
+      while (el !== null) {
+        const style = getComputedStyle(el)
+        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) return el
+        el = el.parentElement
+      }
+      return null
+    }
+    const reset = (): void => {
+      const scroller = scrollerOf()
+      if (scroller !== null) scroller.scrollTop = 0
+    }
+    reset()
+    const raf = window.requestAnimationFrame(reset)
+    const timer = window.setInterval(() => {
+      const rect = node.getBoundingClientRect()
+      if (rect.height > 0 && rect.width > 0) {
+        window.clearInterval(timer)
+        return
+      }
+      reset() // force a reflow so the host's flex layout can settle
+    }, 150)
+    const budget = window.setTimeout(() => window.clearInterval(timer), 1200)
+    return () => {
+      window.cancelAnimationFrame(raf)
+      window.clearInterval(timer)
+      window.clearTimeout(budget)
+    }
+  }, [])
+
   // The full dashboard and the floating summary should never compete for the
   // same pixels. This does not touch the persisted widget preference: leaving
   // the tab restores it exactly as the user left it.
