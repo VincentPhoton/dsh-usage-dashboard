@@ -13,6 +13,10 @@ import {
 const atBeijing = (hour: number, minute = 0): number =>
   Date.UTC(2026, 7, 18, hour - 8, minute)
 
+/** A wall-clock moment in Beijing time (UTC+8), in UTC ms. */
+const atBeijingDate = (year: number, month: number, day: number, hour: number, minute = 0): number =>
+  Date.UTC(year, month - 1, day, hour - 8, minute)
+
 const closeTo = (actual: number, expected: number): void => {
   assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`)
 }
@@ -22,6 +26,37 @@ test('model tiers use flash rates only for flash models', () => {
   assert.equal(tierOf('DEEPSEEK-V4-FLASH'), 'flash')
   assert.equal(tierOf('deepseek-v4-pro'), 'pro')
   assert.equal(tierOf('future-unknown-model'), 'pro')
+})
+
+test('weekends are entirely off-peak even inside peak hours', () => {
+  // 2026-08-22 is a Saturday, 2026-08-23 a Sunday.
+  assert.equal(isPeak(atBeijingDate(2026, 8, 22, 9)), false)
+  assert.equal(isPeak(atBeijingDate(2026, 8, 22, 11, 59)), false)
+  assert.equal(isPeak(atBeijingDate(2026, 8, 22, 14)), false)
+  assert.equal(isPeak(atBeijingDate(2026, 8, 22, 17, 59)), false)
+  assert.equal(isPeak(atBeijingDate(2026, 8, 23, 10)), false)
+  // ...but the same hours on the Friday before were peak.
+  assert.equal(isPeak(atBeijingDate(2026, 8, 21, 10)), true)
+})
+
+test('Chinese statutory holidays are entirely off-peak', () => {
+  // 2026-10-01 (Thu) National Day and 2026-02-16 (Mon) Spring Festival are
+  // workdays that fall inside the holiday calendar → off-peak all day.
+  assert.equal(isPeak(atBeijingDate(2026, 10, 1, 10)), false)
+  assert.equal(isPeak(atBeijingDate(2026, 10, 1, 14)), false)
+  assert.equal(isPeak(atBeijingDate(2026, 2, 16, 9)), false)
+  // 2026-05-01 (Fri) Labour Day → off-peak even though it is a Friday.
+  assert.equal(isPeak(atBeijingDate(2026, 5, 1, 10, 30)), false)
+  // The working day right before a holiday still peaks: 2026-09-30 (Wed).
+  assert.equal(isPeak(atBeijingDate(2026, 9, 30, 10)), true)
+})
+
+test('years without a holiday calendar fall back to weekday-only rule', () => {
+  // 2027-01-01 (Fri) is not yet announced, so it is judged as an ordinary
+  // workday: 10:00 peaks, 08:00 does not.
+  assert.equal(isPeak(atBeijingDate(2027, 1, 1, 10)), true)
+  assert.equal(isPeak(atBeijingDate(2027, 1, 1, 8)), false)
+  assert.equal(isPeak(atBeijingDate(2027, 1, 2, 10)), false) // Saturday
 })
 
 test('Beijing peak windows include their start and exclude their end', () => {
