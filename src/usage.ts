@@ -10,6 +10,7 @@ import { isValidSessionId, USAGE_WINDOW_DAYS } from './contract.ts'
 import type { BalanceResponse, ModelSeriesPoint, ModelUsage, PeakSplit, PeriodUsage, SessionCost, SessionModelUsage, SessionUsageResponse, UsageCoverage, UsageData, UsageResponse, UsageSummary, UsageWindowDays } from './contract.ts'
 import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from './context.ts'
 import { cacheSavingOf, costOf, costUnderPeakEra, isPeak, pricingInfo } from './pricing.ts'
+import { trackDailyConsumption } from './balance-tracker.ts'
 
 const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n))
 
@@ -17,7 +18,13 @@ function errorMessage(err: unknown): string {
   return (err as { message?: string } | null)?.message ?? String(err)
 }
 
-export async function fetchBalance(credentials: CredentialsFace | undefined): Promise<BalanceResponse> {
+/**
+ * Balance + platform-accounted daily consumption.
+ *
+ * `statePath` is injectable so tests can point the balance-delta tracker at a
+ * temp file instead of the real `~/.dsh` state.
+ */
+export async function fetchBalance(credentials: CredentialsFace | undefined, statePath?: string): Promise<BalanceResponse> {
   if (credentials === undefined) return { ok: false, error: '凭证服务不可用' }
   let cred: { value: string } | undefined
   try {
@@ -48,16 +55,18 @@ export async function fetchBalance(credentials: CredentialsFace | undefined): Pr
     is_available?: boolean
     balance_infos?: Array<{ currency?: string; total_balance?: string; granted_balance?: string; topped_up_balance?: string }>
   }
+  const balances = (p.balance_infos ?? []).map(b => ({
+    currency: b.currency ?? '',
+    total: b.total_balance ?? '0',
+    granted: b.granted_balance ?? '0',
+    toppedUp: b.topped_up_balance ?? '0',
+  }))
   return {
     ok: true,
     data: {
       isAvailable: p.is_available === true,
-      balances: (p.balance_infos ?? []).map(b => ({
-        currency: b.currency ?? '',
-        total: b.total_balance ?? '0',
-        granted: b.granted_balance ?? '0',
-        toppedUp: b.topped_up_balance ?? '0',
-      })),
+      balances,
+      todayConsumed: trackDailyConsumption(balances, Date.now(), statePath),
     },
   }
 }

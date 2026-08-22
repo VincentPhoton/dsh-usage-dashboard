@@ -1328,6 +1328,14 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
                 {balance?.isAvailable === false ? t('common.unavailable') : t('common.available')}
               </div>
             </Stat>
+            <Stat label={t('balance.todayConsumed')}>
+              <div
+                className="dq-stat-value"
+                title={balance?.todayConsumed == null ? t('balance.todayConsumedEmpty') : t('balance.todayConsumedTitle')}
+              >
+                {balance?.todayConsumed == null ? '—' : `${fmt(balance.todayConsumed)} ${primary?.currency ?? ''}`}
+              </div>
+            </Stat>
           </div>
         ) : loadingBalance ? (
           <BalanceSkeleton />

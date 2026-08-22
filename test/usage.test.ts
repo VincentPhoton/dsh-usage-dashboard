@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from '../src/context.ts'
 import { isValidSessionId } from '../src/contract.ts'
 import { cacheSavingOf, costOf, costUnderPeakEra } from '../src/pricing.ts'
@@ -273,7 +276,10 @@ test('balance fetch resolves credentials and maps the DeepSeek response', async 
       return { value: 'test-key', source: 'test' }
     },
   }
-  assert.deepEqual(await fetchBalance(credentials), {
+  // Point the balance-delta tracker at a temp file: first poll of the day has
+  // no baseline yet, so todayConsumed is null and nothing real is overwritten.
+  const statePath = join(tmpdir(), `dsh-usage-dashboard-test-${process.pid}-${Date.now()}.json`)
+  assert.deepEqual(await fetchBalance(credentials, statePath), {
     ok: true,
     data: {
       isAvailable: true,
@@ -283,8 +289,38 @@ test('balance fetch resolves credentials and maps the DeepSeek response', async 
         granted: '2.50',
         toppedUp: '40.00',
       }],
+      todayConsumed: null,
     },
   })
+})
+
+test('balance delta tracker reports platform-accounted daily consumption', async () => {
+  const statePath = join(tmpdir(), `dsh-usage-dashboard-delta-${process.pid}-${Date.now()}.json`)
+  const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10)
+  // Seed a day-start baseline: total 100, toppedUp 50.
+  writeFileSync(statePath, JSON.stringify({ date: today, total: 100, toppedUp: 50 }), 'utf8')
+
+  const credentials: CredentialsFace = { resolve: async () => ({ value: 'test-key', source: 'test' }) }
+  const withBalances = (total: string, toppedUp: string) => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      is_available: true,
+      balance_infos: [{ currency: 'CNY', total_balance: total, granted_balance: '0', topped_up_balance: toppedUp }],
+    }), { status: 200 })) as typeof fetch
+  }
+
+  // Balance dropped by 10 and a 10 top-up landed → consumed = 100 - 90 + (60 - 50) = 20.
+  withBalances('90.00', '60.00')
+  assert.deepEqual((await fetchBalance(credentials, statePath)).data?.todayConsumed, 20)
+
+  // Balance unchanged since the baseline → nothing consumed.
+  withBalances('100.00', '50.00')
+  assert.deepEqual((await fetchBalance(credentials, statePath)).data?.todayConsumed, 0)
+
+  // Clamped at zero: a refund/rounding would otherwise go negative.
+  withBalances('105.00', '50.00')
+  assert.deepEqual((await fetchBalance(credentials, statePath)).data?.todayConsumed, 0)
+
+  rmSync(statePath, { force: true })
 })
 
 test('balance fetch returns actionable errors without calling an absent credential', async () => {

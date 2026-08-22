@@ -10,6 +10,9 @@ export interface BalanceInfo {
 export interface BalanceData {
   isAvailable: boolean
   balances: BalanceInfo[]
+  /** 今日消耗（平台口径，余额差值核算）：今晨余额 − 当前余额 + 今日充值增量。
+   *  null = 还没有可用的当日基准（当天第一次轮询，或状态文件缺失）。 */
+  todayConsumed: number | null
 }
 
 export interface BalanceResponse {
