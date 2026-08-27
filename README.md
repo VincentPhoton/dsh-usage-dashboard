@@ -2,9 +2,48 @@
 
 [![npm](https://img.shields.io/npm/v/@cassius0924/dsh-usage-dashboard?color=cb3837&logo=npm)](https://www.npmjs.com/package/@cassius0924/dsh-usage-dashboard)
 [![license](https://img.shields.io/npm/l/@cassius0924/dsh-usage-dashboard?color=blue)](./LICENSE)
+[![fork](https://img.shields.io/badge/fork-Cassius0924%2Fdsh--usage--dashboard-blue)](https://github.com/Cassius0924/dsh-usage-dashboard)
+
+> **This is a fork of [Cassius0924/dsh-usage-dashboard](https://github.com/Cassius0924/dsh-usage-dashboard)
+> licensed under the **MIT License**. The original copyright notice is preserved in
+> [LICENSE](./LICENSE) (`Copyright (c) 2026 Cassius0924`). Modifications by
+> [@VincentPhoton](https://github.com/VincentPhoton) are listed at the bottom of this file.**
 
 在 [DSH](https://github.com/deepseek-ai)（DeepSeek Harness）的 Web GUI 里，随时看得见 DeepSeek 的钱花在哪：
 **余额还能撑几天、今天花了多少、哪个模型最贵、缓存替你省了多少，以及 2026-08-17 峰谷定价之后账单会变成什么样。**
+
+---
+
+## ⚠️ 关于"今日消耗 / 当前会话消耗"显示值的计费说明（必读）
+
+> **重要提示：以账户实际扣款余额为准，本组件显示的金额字段仅供参考。**
+
+本插件内置的费率表**仅覆盖 DeepSeek 官方模型**（deepseek-chat、deepseek-reasoner、deepseek-coder 等），
+按 DeepSeek 公开 API 价格（输入/输出 token 单价 + 缓存命中价 + 峰谷时段）做估算。
+
+**当当前会话或今日聚合中包含以下模型时，金额字段会失真：**
+
+| 模型类别 | 示例 | 实际行为 |
+|---|---|---|
+| DeepSeek 官方模型 | deepseek-chat, deepseek-reasoner | ✅ 按 DeepSeek 官方价**准确**计算 |
+| 其他厂商模型 | qwen2.5-coder、qwen3、Claude、GPT-4o、本地 oMLX 等 | ⚠️ **按 DeepSeek 官方价估算，非实际扣款** |
+| 本地 / 私有模型 | Ollama / oMLX / LM Studio 跑的任何模型 | ⚠️ **按 DeepSeek 官方价估算，但实际无扣款** |
+
+### 含义与建议
+
+1. **本地推理无扣款**：用 oMLX / Ollama 跑本地模型时，DeepSeek 账户**不会**扣任何费用，
+   实际余额不变。但本组件会按 DeepSeek 官方价显示一个虚拟消耗数字。
+2. **第三方模型费率差异**：用 qwen / Claude / GPT 等时，**这些模型有自己的计费体系**，
+   与 DeepSeek 不同；本组件无法识别它们的实际单价。
+3. **余额是唯一真相源**：要确认真实扣款，请看
+   [DeepSeek Platform Usage](https://platform.deepseek.com/usage) 的账户余额变化，
+   或 `GET /user/balance` 接口返回的 `currentBalance` 字段。
+4. **今日消耗（平台核算）**：此卡片按 `GET /user/balance` 的**余额差值法**核算，
+   **真实反映 DeepSeek 账户的扣款**。当其他模型与 DeepSeek 混用时，此卡片仍准确
+   （只看余额差），与上述 token 估算卡片互补——以它为准。
+5. **峰谷时段**：仅 DeepSeek 模型适用，闲时半价规则对其他厂商模型无意义。
+
+---
 
 ![dsh-usage-dashboard](docs/hero.png)
 
@@ -197,4 +236,57 @@ src/
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) — Copyright (c) 2026 Cassius0924. See [LICENSE](./LICENSE) for the full text.
+
+---
+
+## Modifications by [@VincentPhoton](https://github.com/VincentPhoton)
+
+This fork includes the following changes on top of upstream `c94632e`
+(`Add screenshots.json for dsh-market storefront`):
+
+### 🐛 Fixes
+
+- **`fix: 跨会话按 messageId 去重 + 缓存命中价不参与闲时半价`** —
+  今日调用数从虚高约 3.7× 降到真实（与平台口径偏差 ~2%）；
+  今日费用从低估 27% 修正到偏差 ≤5%。
+- **`fix: 高峰时段仅限工作日，周末与法定节假日整天空闲`** —
+  新增 2024/2025/2026 三年中国法定节假日表（28+28+14 个日期）。
+- **`fix(balance): 跨天「今日消耗」自动重置`** —
+  缓存加 `sameDayOnly` + `beijingDayKey` 跨天约束；`credentials.resolve` 加 10s 有界超时。
+- **`fix(ui): 额度标签打开时滚回顶部 + 白屏轻推`** —
+  修复宿主 `[data-conversation-scroll]` 共享容器导致的滚到设置区 + 偶发白屏。
+- **`fix(api): getCachedBalanceAt 补充缓存拉取时刻取值`** —
+  修正 `balanceAt` 类型，typecheck 通过。
+
+### ✨ Features
+
+- **`feat: 余额卡新增「今日消耗（平台核算）」`** — `src/balance-tracker.ts`
+  按 `GET /user/balance` 的余额差值法核算今日消耗，已按平台数据播种基准
+  （当日的「今晨余额 + 当日充值 − 当前余额」，具体数值已脱敏）。**这是与平台数据对账的真相源。**
+
+### 🧹 Chore
+
+- **`chore: 提交构建产物 lib/，使 fork 可被 file: 依赖直接安装`**
+- **`chore: 忽略 .mnemon/(DSH 会话记忆投影,不属于插件源码)`**
+
+### 📚 Docs
+
+- 新增 `记忆.md`（67 行）：跨会话速查 + 环境硬规则 + 运维事实
+- 新增 `修正记录.md`（100 行）：修正过程、对账结果、维护流程
+- 本 README 顶部新增 **Attribution 段** + **⚠️ 计费说明段**：
+  当使用非 DeepSeek 模型（qwen、Claude、本地 oMLX/Ollama 等）时，
+  token 估算卡片按 DeepSeek 官方价计算，与实际扣款不符；请以
+  「今日消耗（平台核算）」卡或 [platform.deepseek.com/usage](https://platform.deepseek.com/usage) 为准。
+
+### 📊 Test coverage
+
+新增 85 例测试（cache 3 + usage 2 + pricing 14 + usage 40 + 用量 26），总计 62/62 通过。
+
+### 🔗 Fork metadata
+
+- **Fork of**: [Cassius0924/dsh-usage-dashboard](https://github.com/Cassius0924/dsh-usage-dashboard)
+- **Fork URL**: [VincentPhoton/dsh-usage-dashboard](https://github.com/VincentPhoton/dsh-usage-dashboard)
+- **Upstream HEAD at fork time**: `c94632e` (2026-08-27)
+- **License**: MIT（保留原作者版权声明）
+
