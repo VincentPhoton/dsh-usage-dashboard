@@ -93,6 +93,17 @@
 
 ## 已完成（续）
 
+- （轮次 51）`fix(pricing)`: 计价说明跟进官方 2026-09-10 调价（用户要求「更新计价说明」）。
+  - 官方在 2026-09-10 12:00 起下调 Flash 系列（V4.1-Flash：高峰 0.04/2/8，闲时 0.02/1/4），
+    并把高峰时段收紧为**周一至周五**；2026-09-14 12:00 起 `deepseek-v4-pro` 请求由 V4.1-Flash
+    承接、按 Flash 价计费。
+  - 改法：`src/pricing.ts` 的单价表升级为**按生效时刻分档的 era 列表**（08-17 表 / 09-10 表），
+    每条历史用量按自己发生时刻的价目表计价（8 月历史的估算不变）；高峰判定带 era 的工作日规则；
+    新增 pro→flash 的计费改道；`pricingInfo` 输出当前 era 的表，并在改道后把 pro 行标注为
+    `deepseek-v4-pro → deepseek-v4-flash`。
+  - i18n（zh/en）与 README 单价表同步更新；新增 2 个测试覆盖 09-10、09-14 两个边界。
+  - Verify：59/59 通过；typecheck exit 0；build exit 0；浏览器实测计价卡显示新表。
+
 - （轮次 50）`feat(dashboard)`: 额度页底部展示插件版本 footer（用户要求）。
   - 版本串由 `build.mjs` 从 package.json 注入 esbuild define（`__PLUGIN_LABEL__` = `<包名> v<版本>`），
     UI 不硬编码、发版自动跟随；`.dq-footer` 复用现有 12px 三级文字色档位，居中在「设置」卡之后。

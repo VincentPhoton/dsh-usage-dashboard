@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   PEAK_PRICING_FROM_MS,
+  PRO_ROUTED_TO_FLASH_FROM_MS,
+  V41_FLASH_PRICING_FROM_MS,
   cacheSavingOf,
   costOf,
   estimateImageTokens,
@@ -13,6 +15,10 @@ import {
 
 const atBeijing = (hour: number, minute = 0): number =>
   Date.UTC(2026, 7, 18, hour - 8, minute)
+
+/** The same Beijing-clock helper on any 2026 date, month 1-based. */
+const atBeijingDate = (month: number, day: number, hour: number, minute = 0): number =>
+  Date.UTC(2026, month - 1, day, hour - 8, minute)
 
 const closeTo = (actual: number, expected: number): void => {
   assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`)
@@ -96,6 +102,41 @@ test('pricing metadata always describes the active peak/off-peak table', () => {
   assert.ok(flash !== undefined)
   assert.deepEqual(vision.peak, flash.peak)
   assert.deepEqual(vision.offPeak, flash.offPeak)
+})
+
+test('the 2026-09-10 V4.1-Flash table cheapens flash and narrows peak to weekdays', () => {
+  // 2026-09-09 (Wednesday) 13:00: the last day of the previous table.
+  assert.deepEqual(ratesAt(atBeijingDate(9, 9, 13), 'deepseek-v4-flash'), { cacheHit: 0.05, input: 1.5, output: 4.5 })
+  // 2026-09-10 (Thursday): the new table landed at 12:00 that day, so the
+  // morning peak still bills at the old rate.
+  assert.deepEqual(ratesAt(atBeijingDate(9, 10, 9), 'deepseek-v4-flash'), { cacheHit: 0.1, input: 3, output: 9 })
+  assert.deepEqual(ratesAt(atBeijingDate(9, 10, 13), 'deepseek-v4-flash'), { cacheHit: 0.02, input: 1, output: 4 })
+  assert.deepEqual(ratesAt(atBeijingDate(9, 11, 9), 'deepseek-v4-flash'), { cacheHit: 0.04, input: 2, output: 8 })
+  // The vision model keeps tracking flash across the boundary.
+  assert.deepEqual(ratesAt(atBeijingDate(9, 11, 13), 'deepseek-v4-flash-vision-exp'), { cacheHit: 0.02, input: 1, output: 4 })
+  const info = pricingInfo(atBeijingDate(9, 11, 13))
+  assert.deepEqual(info.tiers[1].peak, { cacheHit: 0.04, input: 2, output: 8 })
+  assert.deepEqual(info.tiers[1].offPeak, { cacheHit: 0.02, input: 1, output: 4 })
+  // Peak windows are weekdays only from here: 09-12 is a Saturday.
+  assert.equal(isPeak(atBeijingDate(9, 12, 10)), false)
+  assert.equal(isPeak(atBeijingDate(9, 11, 10)), true)
+})
+
+test('deepseek-v4-pro bills at flash rates from 2026-09-14 12:00', () => {
+  // The 09-14 morning peak is the last window billed at pro rates.
+  assert.deepEqual(ratesAt(atBeijingDate(9, 14, 10), 'deepseek-v4-pro'), { cacheHit: 0.3, input: 9, output: 27 })
+  // From 12:00 the same model bills as flash: off-peak straight away, peak
+  // again from 14:00.
+  assert.deepEqual(ratesAt(atBeijingDate(9, 14, 12), 'deepseek-v4-pro'), { cacheHit: 0.02, input: 1, output: 4 })
+  // The Flash cut on 09-10 did not touch pro: still its own off-peak rate.
+  assert.deepEqual(ratesAt(V41_FLASH_PRICING_FROM_MS, 'deepseek-v4-pro'), { cacheHit: 0.15, input: 4.5, output: 13.5 })
+  assert.deepEqual(ratesAt(PRO_ROUTED_TO_FLASH_FROM_MS, 'deepseek-v4-pro'), { cacheHit: 0.02, input: 1, output: 4 })
+  assert.deepEqual(ratesAt(atBeijingDate(9, 14, 15), 'deepseek-v4-pro'), { cacheHit: 0.04, input: 2, output: 8 })
+  // The table labels the row with what it bills as, from that date on.
+  assert.equal(pricingInfo(atBeijingDate(9, 13, 15)).tiers[0].model, 'deepseek-v4-pro')
+  const routed = pricingInfo(atBeijingDate(9, 14, 15))
+  assert.equal(routed.tiers[0].model, 'deepseek-v4-pro → deepseek-v4-flash')
+  assert.deepEqual(routed.tiers[0].peak, { cacheHit: 0.04, input: 2, output: 8 })
 })
 
 test('image token estimate follows the official resize rule and 384-token cap', () => {
