@@ -239,6 +239,7 @@ function PricingNote(props: { pricing: PricingInfo }): ReactElement {
           {t('pricing.unit', { currency: pricing.currency })}
           {t('pricing.splitNote', { windows: pricing.peakWindows.join(t('common.listSeparator')) })}
           {t('pricing.visionNote')}
+          {t('pricing.modelNote')}
           {t('pricing.unknown')}
         </p>
       </div>

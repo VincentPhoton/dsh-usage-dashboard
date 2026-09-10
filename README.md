@@ -154,18 +154,14 @@ dsh plugin --profile web add ./path/to/dsh-usage-dashboard
 - 高峰时段按**北京时间**判定，不随机器时区漂移。
 - 未识别的模型按 `deepseek-v4-pro`（较贵的一侧）计价。
 
-单价（CNY / 百万 tokens）：
+单价（CNY / 百万 tokens，与官方价目表的两档一致）：
 
 | 模型 | 时段 | 输入·缓存命中 | 输入·未命中 | 输出 |
 |---|---|---|---|---|
-| deepseek-v4-pro | 08-17 前固定 | 0.025 | 3 | 6 |
-| deepseek-v4-pro | 08-17 起 高峰 / 闲时 | 0.3 / 0.15 | 9 / 4.5 | 27 / 13.5 |
-| deepseek-v4-pro | 09-14 12:00 起（按 Flash 计费） | 0.04 / 0.02 | 2 / 1 | 8 / 4 |
-| deepseek-v4-flash | 08-17 前固定 | 0.02 | 1 | 2 |
-| deepseek-v4-flash | 08-17 – 09-10 12:00 高峰 / 闲时 | 0.1 / 0.05 | 3 / 1.5 | 9 / 4.5 |
-| deepseek-v4-flash | 09-10 12:00 起 高峰 / 闲时 | 0.04 / 0.02 | 2 / 1 | 8 / 4 |
+| deepseek-flash | 高峰 / 闲时 | 0.04 / 0.02 | 2 / 1 | 8 / 4 |
+| deepseek-v4-pro | 高峰 / 闲时 | 0.3 / 0.15 | 9 / 4.5 | 27 / 13.5 |
 
-`deepseek-v4-flash-vision-exp` 与 `deepseek-v4-flash` 都是旧模型名（现为 `deepseek-flash`），一直按 Flash 价计费，上表逐时期同样适用。
+`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 是旧模型名，现由 `deepseek-flash` 承接、按 Flash 价计费；2026-09-14 12:00 起 `deepseek-v4-pro` 的请求也路由到 V4.1-Flash，按 Flash 价计费。历史各时期单价：08-17 前 pro 0.025/3/6、flash 0.02/1/2；08-17 – 09-10 12:00 的 flash 高峰 0.1/3/9、闲时 0.05/1.5/4.5。
 
 图片不另外收费，而是按尺寸折算成 token 与文本一并计费：官方规则是先把图片按比例缩放到 ~800×800（小于 ~384×384 的放大），token 与缩放后面积成正比、每张上限 384 tokens。多模态卡的估算就套这条规则。
 

@@ -179,21 +179,17 @@ export function costUnderPeakEra(timeMs: number, model: string, input: number, c
   return applyRates(rates, input, cache, output)
 }
 
-/** The price table to show the user: the era in force now, with the pro row
- *  labelled with what it bills as once its requests are routed to Flash. */
+/** The price table to show the user: the two models the official docs list,
+ *  so the rows match the page they come from — legacy names, image tokens and
+ *  the pro routing live in the small print next to the table. */
 export function pricingInfo(nowMs: number): PricingInfo {
   const era = eraAt(nowMs)
-  const proTier = billedTierOf(nowMs, 'deepseek-v4-pro')
   const row = (model: string, tier: Tier) => ({ model, peak: era.peak[tier], offPeak: halved(era.peak[tier]) })
   return {
     currency: 'CNY',
     switchDate: '2026-08-17',
     inPeakNow: isPeak(nowMs),
     peakWindows: ['09:00–12:00', '14:00–18:00'],
-    tiers: [
-      row(proTier === 'flash' ? 'deepseek-v4-pro → deepseek-v4-flash' : 'deepseek-v4-pro', proTier),
-      row('deepseek-v4-flash', 'flash'),
-      row('deepseek-v4-flash-vision-exp', 'vision'),
-    ],
+    tiers: [row('deepseek-flash', 'flash'), row('deepseek-v4-pro', 'pro')],
   }
 }
