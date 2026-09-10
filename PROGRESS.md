@@ -102,6 +102,8 @@
     新增 pro→flash 的计费改道；`pricingInfo` 输出当前 era 的表，并在改道后把 pro 行标注为
     `deepseek-v4-pro → deepseek-v4-flash`。
   - i18n（zh/en）与 README 单价表同步更新；新增 2 个测试覆盖 09-10、09-14 两个边界。
+  - 追加（同日）：计价表按官方文档收敛为两行（`deepseek-flash` / `deepseek-v4-pro`），旧模型名、
+    pro 改道、图片折算等改放小字说明（用户要求「表格里只写 flash 和 v4-pro，其他用小字」）。
   - Verify：59/59 通过；typecheck exit 0；build exit 0；浏览器实测计价卡显示新表。
 
 - （轮次 50）`feat(dashboard)`: 额度页底部展示插件版本 footer（用户要求）。
