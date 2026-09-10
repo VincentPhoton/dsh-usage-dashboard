@@ -93,6 +93,81 @@
 
 ## 已完成（续）
 
+- （轮次 48）`feat(dashboard)`: DeepSeek-V4-Flash-Vision-Exp 多模态用量卡 + 定价表升级 + 移除「涨价前」叙事。
+  - 背景：2026-08-21 官方上线首个多模态模型 `deepseek-v4-flash-vision-exp`（图片 + 文本输入，DSH 目录
+    `llm-deepseek` 已带 `inputModalities:['text','image']`，序列化层会把 durable 附件转成 data-URL）。
+    官方口径：与 flash 同价（高峰 0.10/3.00/9.00，闲时减半）；图片按尺寸折算 token 与文本一并计费——
+    先按比例缩放（上限 ~800×800、小于 ~384×384 放大），token 与缩放后面积成正比、每张上限 384。日志里
+    `user/message` 的 content 与 `tool/result` 的嵌套 content 都带 `image` attachment（含 width/height/bytes），
+    本插件重放会话日志时即可统计，无需读附件本体。峰谷定价已于 2026-08-17 生效，界面里「同样用量在新价下 /
+    倒计时 / 生效前预估」等分支已成死代码。
+  - Act：
+    1. `src/pricing.ts`：新增 `estimateImageTokens(w,h)`（官方缩放+面积线性+384 上限，缺失/非法尺寸返回 0）；
+       `tierOf` 改为三层映射（vision > flash > pro，vision 优先于 flash，否则 vision-exp 会命中 flash）；
+       `LEGACY_RATES`/`PEAK_RATES` 补 vision = flash；`pricingInfo` 去掉 `splitActive`、tiers 固定三行
+       （pro / flash / vision-exp，后两行数值相同为官方同价），`offPeak` 不再可空。
+    2. `src/context.ts`：`SessionEventFace.data` 增加 `content`（user/message）与 `message.content`
+       （tool/result），新增 `ImageAttachmentFace` / `ContentBlockFace` 结构面。
+    3. `src/usage.ts`：`addUsageEvent` 边重放边收集图片——任何事件里的 image 块进 pending 队列，
+       归属到随后一条有效 usage 记录（即真正消费它们的模型调用）；没有后随调用则不计入
+       （无调用即无计费）。每条记录按 `estimateImageTokens` 估算 token，并以该记录模型 + 时段
+       的未命中单价估算费用；按天 / 按窗口 / 按会话聚合，响应新增 `vision` / `visionDaily` /
+       `visionSessions`（窗口级与全局）。
+    4. `dashboard.tsx / locales.ts / styles.ts`：新「图片 / 多模态用量」卡（张数、估算 token 与费用、
+       占窗口输入/费用比例、每天图片数柱图、图片最多的会话排行、估算口径注脚）；「计价说明」删掉
+       固定单价分支与 `switchNote`，新增 `pricing.visionNote`；Peak 卡删掉「新价下 / 较现价 +%」与
+       `futureHint`，只保留「挪到闲时可省」模式；对应中英文词典同步。
+    5. 文档：README 的「涨价之后会变成多少」改写为「高峰时段多付了多少」，价格表补 vision-exp 行与图片
+       折算说明，已知限制补估算口径；TODO 新增脑暴轮次 #8（已完成 2 项 + 2 个新候选）；package.json
+       描述去掉「涨价后账单预估」。
+  - Verify：`pnpm run typecheck`（exit 0）、`node test/run.mjs`（54/54，新增 pricing 3 条与 usage 1 条用例：
+    vision 分层优先于 flash、vision=flash 全时段定价、`estimateImageTokens` 四类边界、图片块从
+    user/message 与 tool/result 嵌套内容聚合、无后续调用不计入、窗口/会话/全局口径一致）、`pnpm run build`
+    （exit 0）均绿。注意：`docs/vision.png` 截图尚未补拍，README 该节暂无截图占位，后续轮次补。
+  - 收尾修复（host 未重启的真实故障）：用户刷新后拿到新 client 包但 host 仍是旧进程
+    （`/api/dsh-usage-dashboard/usage` 响应无 vision 字段），`VisionCard` 读 `activeWindow.vision.images`
+    抛 TypeError（"Cannot read properties of undefined (reading 'images')"），清 localStorage 无效——因为
+    旧数据每次 fetch 都会重新灌回内存缓存且 `put` 从不校验形状。两处修复：仪表盘在 `activeWindow.vision`
+    缺失时隐藏该卡（host 升级后自动出现），`api.ts` 的 `put` 也过 `usageIsUsable` 后才入缓存；`typecheck`
+    + 54/54 + build 全绿。
+  - 追加修复（host 已重启但面板仍空壳）：直连 API（带登录 cookie + `?refresh=1`）确认 host 已返回 vision
+    字段（images=1 / 384 tokens / ¥0.000576，正是用户在会话里发的截图）——浏览器却渲染出「标题 + 空体」
+    的壳卡，根因是**浏览器 HTTP 缓存**：旧 host 响应带 `Cache-Control: max-age=300`，新页面加载时
+    `fetch(cache:'default')` 直接命中旧 body（无 vision），`usageIsUsable` 不过 → 布局走进「隐藏」分支，
+    只留了标题壳且永远不变（内存缓存拒绝收，故每次渲染都跳回旧分支）。修复：usage 请求改为
+    恒 `cache:'no-store'`（host 的 5 分钟 memo + 客户端 TTL 缓存已足够去重，HTTP 缓存是多余且危险的
+    第三层）；同时旧 host 场景改成**整卡不渲染**（`null`）而不是留空壳。`typecheck` + 54/54 + build 全绿。
+  - 追加修复（多模态卡把父容器撑宽）：用户截图显示「图片 / 多模态用量」卡比其它卡片宽约 40px，撑大
+    `.dq-balance`。本机 Playwright（1440/1240 双视口）注入 1200px 宽内容后确认当前 Chromium 下
+    `.dq-balance`（max-width:860）不动、内容直接溢出——但用户浏览器的不同实现下，flex 项 `min-width:auto`
+    会以内容 min-content 撑宽容器。结构加固：`.dq-card` 补 `min-width:0;max-width:100%`（任何渲染器下卡
+    都不能超过容器）；多模态卡会话行复用 `.dq-session-head` 但缺 `.dq-session-summary-body{min-width:0}`
+    链条（排行卡有、这里没有），补 `.dq-vision-sessions` 下 `head/title` 的 `min-width:0` 链 + title
+    `flex:1 1 auto`（长标题 must ellipsize 而非撑宽）。验证：Playwright 双视口 11 张卡全部 860px 等宽；
+    注入 12 倍长标题 → 卡仍 860、标题省略号生效、`balance.scrollWidth` 908 不变；impeccable 机械布局扫描
+    `[]`；typecheck + 54/54 + build 全绿。
+  - 真正根因（无痕/硬刷仍复现，附用户原图 1928×1480 像素级测量）：**面板固定 `max-width:860px` 比输入框宽**。
+    用户视口 ≈964 CSS（DPR2：面板卡 858.5✓=860、输入框 819），卡片左右各探出 ~20px，视觉上像新卡把
+    面板"撑大"——不是 flex 内容撑宽（本机 Chromium 注入 1200px 也撑不动 908），而是固定阅读列和 DSH
+    输入框宽度在较窄视口不一致。且宽度测量链路此前是坏的：仪表盘挂载点不在 `data-shell-overlay` 子树下，
+    `getShellFrame` 返回 null → `getComposerElement(null)` 恒 null（`--dq-composer-h` 从未被运行时测量，
+    一直是 126px 回退）。修复：`dom.ts` 的 `getComposerElement` 支持 frame=null 时 document 级回退；
+    dashboard 同时测量 composer 宽度写入 `--dq-composer-w`；
+    `.dq-balance{max-width:min(860px,var(--dq-composer-w,860px))}`——宽视口保持 860 阅读列（1440 实测
+    composer 1152 → 面板仍 860，零回归），窄视口（composer<860）面板精确收窄到输入框宽度。验证：
+    Playwright 964 视口 csW=676 生效、面板与 composer 同宽、全部卡等宽；服务端 `serveBundle` 每请求
+    `readFile` 磁盘 bundle，md5 与 `lib/client.js` 一致（无痕模式拿到的确实是最新代码）；机械扫描 `[]`；
+    typecheck + 54/54 + build 全绿。
+  - 终修（用户复测仍有偏差，附原图 1928×1480 与 DOM 实测）：**`.dock` seat 占满整列，不是可见输入框**。
+    seat 是 1152（1440 视口）/964，而 DSH 的输入框是恒定 ~780px 的圆角卡片（textarea 的第三层祖先
+    `*.card`，bg 白 + radius 22px；用户截图 178..1736 设备 = 779.5 CSS ✓ 与 1440 实测 780 一致）。
+    上一轮 `csW` 量的 seat → `min(860, 1152)=860` → 面板根本没变窄，用户看到"还是宽于输入框"
+    （原面板 860 一直宽于输入框 780，此前无感知；用户要求精确对齐输入框）。修复：新增
+    `getComposerInputElement(frame)`——从 textarea 祖先链向上找第一个"可见背景 + 非零圆角"的卡片元素，
+    找不到再回退 seat；dashboard 用它量宽度（观察它也纳入 ResizeObserver）。验证：Playwright 1440 →
+    `csW=780`、卡 780、卡列 x=466..1246 与输入框矩形完全重合（截图确认）；964 → csW=644 同样对齐；
+    全部卡等宽；机械扫描 `[]`；typecheck + 54/54 + build 全绿。用户改动备份：`git stash create`
+    SHA c9af72a + `/tmp/dsh-usage-changes-backup.patch`（HEAD d7bc428 前全部工作区差异）。
 - （轮次 47）`fix(dashboard)`: 修复余额明细 hover 无内容（同款平台限制）。
   - 背景：轮次 43 修复「预计可用」（`.dq-runway`）hover 无内容时，独立 QA 用真实鼠标 hover（非模拟事件）
     确认了一个平台级限制——未展开（`open` 为 `false`）的 `<details>` 元素，它的非 `summary` 子元素即使

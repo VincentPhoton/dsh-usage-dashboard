@@ -10,12 +10,12 @@ import { USAGE_WINDOW_DAYS } from '../contract.ts'
 import { fetchBalance, fetchSessionUsage, fetchUsage, getCachedBalance, getCachedUsage, getCachedUsageAt } from './api.ts'
 import { budgetSnapshot } from './budget.ts'
 import { Bars, GroupedBars, Heatmap, MODEL_COLORS, fmt, fmtCompact, fmtInt } from './charts.tsx'
-import { getComposerElement, getShellFrame } from './dom.ts'
+import { getComposerElement, getComposerInputElement, getShellFrame } from './dom.ts'
 import { dailyUsageCsv, downloadText, exportDateStamp, fullUsageJson, modelUsageCsv } from './export.ts'
 import { syncStatusText, type SyncState } from './freshness.ts'
 import { fallbackT, localizeApiError, useI18n, type Translate } from './i18n.tsx'
 import { CHART_METRICS, chartMetricName, chartMetricValue, type ChartMetric } from './metric.ts'
-import type { BalanceData, ModelUsage, PeakSplit, PeriodUsage, PricingInfo, SessionCost, SessionUsageData, UsageCoverage, UsageData, UsageWindowDays } from '../contract.ts'
+import type { BalanceData, ModelUsage, PeakSplit, PeriodUsage, PricingInfo, SessionCost, SessionUsageData, UsageCoverage, UsageData, UsageWindowDays, VisionDayPoint, VisionSession, VisionStats } from '../contract.ts'
 import { chartMetricStore, lowBalanceStore, monthlyBudgetStore, quotaViewActiveStore, usageWindowStore, widgetTabIdsStore, widgetVisibleStore } from './store.ts'
 import type { ConversationViewTab, ConversationViewsSource } from './views.ts'
 
@@ -192,23 +192,20 @@ const rate = (value: number): string => `¥${value.toLocaleString(undefined, { m
 function PricingNote(props: { pricing: PricingInfo }): ReactElement {
   const { t } = useI18n()
   const { pricing } = props
-  const split = pricing.splitActive
   return (
     <details className="dq-pricing">
       <summary className="dq-pricing-summary">
         {t('pricing.title')}
-        {split && (
-          <span className={`dq-pricing-now${pricing.inPeakNow ? ' dq-pricing-now--peak' : ''}`}>
-            {pricing.inPeakNow ? t('pricing.currentPeak') : t('pricing.currentOffPeak')}
-          </span>
-        )}
+        <span className={`dq-pricing-now${pricing.inPeakNow ? ' dq-pricing-now--peak' : ''}`}>
+          {pricing.inPeakNow ? t('pricing.currentPeak') : t('pricing.currentOffPeak')}
+        </span>
       </summary>
       <div className="dq-pricing-body">
         <table className="dq-pricing-table">
           <thead>
             <tr>
               <th>{t('pricing.model')}</th>
-              <th>{split ? t('pricing.period') : t('pricing.unitPrice')}</th>
+              <th>{t('pricing.period')}</th>
               <th>{t('pricing.inputCacheHit')}</th>
               <th>{t('pricing.inputCacheMiss')}</th>
               <th>{t('pricing.output')}</th>
@@ -218,29 +215,26 @@ function PricingNote(props: { pricing: PricingInfo }): ReactElement {
             {pricing.tiers.map(tier => (
               <Fragment key={tier.model}>
                 <tr>
-                  <td rowSpan={tier.offPeak !== null ? 2 : 1}>{tier.model}</td>
-                  <td>{split ? t('pricing.peak') : t('pricing.fixed')}</td>
+                  <td rowSpan={2}>{tier.model}</td>
+                  <td>{t('pricing.peak')}</td>
                   <td>{rate(tier.peak.cacheHit)}</td>
                   <td>{rate(tier.peak.input)}</td>
                   <td>{rate(tier.peak.output)}</td>
                 </tr>
-                {tier.offPeak !== null && (
-                  <tr>
-                    <td>{t('pricing.offPeak')}</td>
-                    <td>{rate(tier.offPeak.cacheHit)}</td>
-                    <td>{rate(tier.offPeak.input)}</td>
-                    <td>{rate(tier.offPeak.output)}</td>
-                  </tr>
-                )}
+                <tr>
+                  <td>{t('pricing.offPeak')}</td>
+                  <td>{rate(tier.offPeak.cacheHit)}</td>
+                  <td>{rate(tier.offPeak.input)}</td>
+                  <td>{rate(tier.offPeak.output)}</td>
+                </tr>
               </Fragment>
             ))}
           </tbody>
         </table>
         <p className="dq-pricing-foot">
           {t('pricing.unit', { currency: pricing.currency })}
-          {split
-            ? t('pricing.splitNote', { windows: pricing.peakWindows.join(t('common.listSeparator')), date: pricing.switchDate })
-            : t('pricing.switchNote', { windows: pricing.peakWindows.join(t('common.listSeparator')), date: pricing.switchDate })}
+          {t('pricing.splitNote', { windows: pricing.peakWindows.join(t('common.listSeparator')), date: pricing.switchDate })}
+          {t('pricing.visionNote')}
           {t('pricing.unknown')}
         </p>
       </div>
@@ -515,19 +509,83 @@ function CacheCard(props: { totals: UsageData['totals'] }): ReactElement {
 }
 
 /**
- * Peak vs off-peak: which side of DeepSeek's price windows the usage falls on.
- * Before the 2026-08-17 switch this answers "what will the new prices cost me";
- * after it, "what would shifting work off-peak save me".
+ * Image / multimodal usage: how much of the bill came from pictures. Image
+ * blocks are collected from user messages and tool results during the same
+ * log replay that feeds the rest of the dashboard (no attachment bytes are
+ * read — the refs already carry width/height), so this dimension costs the
+ * replay nothing extra. Tokens are estimated with the official resizing rule
+ * and priced at the consuming call's rates; shares are against the window's
+ * reported input tokens and cost.
  */
-function PeakCard(props: { split: PeakSplit; pricing: PricingInfo; currentCost: number }): ReactElement {
+function VisionCard(props: {
+  vision: VisionStats
+  daily: VisionDayPoint[]
+  sessions: VisionSession[]
+  windowLabel: string
+  inputTokens: number
+  costTotal: number
+}): ReactElement {
   const { t, locale } = useI18n()
-  const { split, pricing, currentCost } = props
+  const { vision, daily, sessions, windowLabel, inputTokens, costTotal } = props
+  if (vision.images === 0) return <div className="dq-empty">{t('vision.empty', { window: windowLabel })}</div>
+  const tokensShare = inputTokens > 0 ? (vision.imageTokens / inputTokens) * 100 : 0
+  const costShare = costTotal > 0 ? (vision.cost / costTotal) * 100 : 0
+  const labelEvery = daily.length <= 7 ? 1 : daily.length <= 30 ? 5 : daily.length <= 90 ? 15 : 30
+  const bars = daily.map(d => ({
+    label: d.date.slice(8, 10),
+    value: d.images,
+    title: t('vision.barTitle', { date: d.date, images: fmtInt(d.images), tokens: fmtCompact(d.imageTokens, locale), cost: fmt(d.cost) }),
+  }))
+  return (
+    <>
+      <div className="dq-usage-totals">
+        <Stat label={t('vision.images')}><div className="dq-stat-value">{fmtInt(vision.images)}</div></Stat>
+        <Stat label={t('vision.tokens')}>
+          <div className="dq-stat-value">
+            {fmtCompact(vision.imageTokens, locale)}
+            {tokensShare > 0 && <span className="dq-vision-share">{t('vision.tokensShare', { percent: tokensShare.toFixed(1) })}</span>}
+          </div>
+        </Stat>
+        <Stat label={t('vision.cost')}>
+          <div className="dq-stat-value">
+            ¥ {fmt(vision.cost)}
+            {costShare > 0 && <span className="dq-vision-share">{t('vision.costShare', { percent: costShare.toFixed(1) })}</span>}
+          </div>
+        </Stat>
+      </div>
+      <div className="dq-chart-title">{t('vision.dailyTitle', { window: windowLabel })}</div>
+      <Bars data={bars} height={80} labelEvery={labelEvery} />
+      {sessions.length > 0 && (
+        <div className="dq-vision-sessions">
+          <div className="dq-chart-title">{t('vision.sessionsTitle')}</div>
+          {sessions.map(session => (
+            <div key={session.id} className="dq-session">
+              <div className="dq-session-head">
+                <span className="dq-session-title" title={session.id}>{session.title}</span>
+                <span className="dq-session-cost">
+                  {t('vision.sessionRow', { images: fmtInt(session.images), cost: fmt(session.cost) })}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="dq-cache-foot">{t('vision.note')}</p>
+    </>
+  )
+}
+
+/**
+ * Peak vs off-peak: which side of DeepSeek's price windows the usage falls on,
+ * and what shifting the peak share off-peak would have saved.
+ */
+function PeakCard(props: { split: PeakSplit; pricing: PricingInfo }): ReactElement {
+  const { t, locale } = useI18n()
+  const { split, pricing } = props
   const total = split.peak.total + split.offPeak.total
   if (total === 0) return <div className="dq-empty">{t('peak.empty')}</div>
   const peakShare = split.peak.total / total
   const shiftSaving = split.peakEraCost - split.offPeakEraCost
-  const increase = split.peakEraCost - currentCost
-  const increasePercent = currentCost > 0 ? (increase / currentCost) * 100 : 0
   return (
     <div className="dq-peak">
       <div
@@ -546,15 +604,6 @@ function PeakCard(props: { split: PeakSplit; pricing: PricingInfo; currentCost: 
         })}</span>
       </div>
       <div className="dq-peak-figures">
-        {!pricing.splitActive && (
-          <div className="dq-stat">
-            <div className="dq-stat-label">{t('peak.newPrice')}</div>
-            <div className="dq-stat-value">
-              ¥ {fmt(split.peakEraCost)}
-              <span className="dq-peak-delta">{t('peak.increase', { percent: increasePercent.toFixed(0) })}</span>
-            </div>
-          </div>
-        )}
         <div className="dq-stat">
           <div className="dq-stat-label">{t('peak.shift')}</div>
           <div className="dq-stat-value">
@@ -565,9 +614,7 @@ function PeakCard(props: { split: PeakSplit; pricing: PricingInfo; currentCost: 
       </div>
       <p className="dq-peak-foot">
         {t('peak.schedule', { windows: pricing.peakWindows.join(t('common.listSeparator')) })}
-        {pricing.splitActive
-          ? t('peak.activeHint')
-          : t('peak.futureHint', { date: pricing.switchDate })}
+        {t('peak.activeHint')}
       </p>
     </div>
   )
@@ -915,6 +962,10 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
   const budgetInputRef = useRef<HTMLInputElement | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [composerHeight, setComposerHeight] = useState<number | null>(null)
+  // The composer's measured width caps the dashboard column: on narrower
+  // viewports the fixed 860px max-width would otherwise overhang the input
+  // box the cards visually belong to (user-facing parity requirement).
+  const [composerWidth, setComposerWidth] = useState<number | null>(null)
   // The current-session card: fetched per session id, not through the
   // account-wide balance/usage caches (see DESIGN_NOTES — session-scoped
   // data does not go through the localStorage-persisted cache). No cached
@@ -928,8 +979,9 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
   // fixed composer, which otherwise overlaps the bottom of a long dashboard
   // (see LEARNINGS.md). Reuses the same `conversation.composer.dock` slot
   // widget.tsx already excludes from its own drag bounds, so both readings of
-  // "where is the composer" stay in sync. Desktop layout never reads this —
-  // the CSS variable is only consumed inside the 620px media query.
+  // "where is the composer" stay in sync. Desktop layout never reads the
+  // height — the CSS variable is only consumed inside the 620px media query;
+  // the width is consumed by .dq-balance at every viewport.
   useLayoutEffect(() => {
     const node = rootRef.current
     if (node === null) return
@@ -937,16 +989,25 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
       const frame = getShellFrame(node)
       const composer = getComposerElement(frame)
       const rect = composer?.getBoundingClientRect() ?? null
-      const next = rect !== null && rect.height > 0 ? Math.round(rect.height) : null
-      setComposerHeight(prev => (prev === next ? prev : next))
+      const nextHeight = rect !== null && rect.height > 0 ? Math.round(rect.height) : null
+      setComposerHeight(prev => (prev === nextHeight ? prev : nextHeight))
+      // Width parity uses the composer's input card (the rounded panel with
+      // the textarea), not the dock seat — the seat spans the whole pane, so
+      // it can never narrow the dashboard column below 860px.
+      const input = getComposerInputElement(frame)
+      const inputRect = input?.getBoundingClientRect() ?? null
+      const nextWidth = inputRect !== null && inputRect.width > 0 ? Math.round(inputRect.width) : null
+      setComposerWidth(prev => (prev === nextWidth ? prev : nextWidth))
     }
     measure()
     const frame = getShellFrame(node)
     const composer = getComposerElement(frame)
+    const input = getComposerInputElement(frame)
     let observer: ResizeObserver | null = null
     if (typeof ResizeObserver === 'function') {
       observer = new ResizeObserver(measure)
       if (composer !== null) observer.observe(composer)
+      if (input !== null) observer.observe(input)
       if (frame !== null) observer.observe(frame)
     }
     window.addEventListener('resize', measure)
@@ -1222,6 +1283,10 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
 
   const composerSafeAreaStyle = {
     '--dq-composer-h': `${composerHeight ?? COMPOSER_FALLBACK_PX}px`,
+    // Only set once measured; .dq-balance's max-width falls back to 860px
+    // without it (pre-measurement render keeps the settled wide-viewport
+    // column, then narrows in place — no flash of the old width).
+    ...(composerWidth !== null ? { '--dq-composer-w': `${composerWidth}px` } : {}),
   } as CSSProperties
 
   return (
@@ -1384,6 +1449,39 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
         {usage !== null && <PricingNote pricing={usage.pricing} />}
       </div>
 
+      {usage !== null && activeWindow !== null && activeWindow.vision !== undefined
+        && Array.isArray(activeWindow.visionDaily) && Array.isArray(activeWindow.visionSessions) ? (
+        <div className="dq-card">
+          <div className="dq-card-title">{t('vision.title')}</div>
+          <VisionCard
+            vision={activeWindow.vision}
+            daily={activeWindow.visionDaily}
+            sessions={activeWindow.visionSessions}
+            windowLabel={activeWindowName}
+            inputTokens={activeWindow.totals.input}
+            costTotal={activeWindow.totals.cost}
+          />
+        </div>
+      ) : usage === null ? (
+        <div className="dq-card">
+          <div className="dq-card-title">{t('vision.title')}</div>
+          {loadingUsage ? (
+            <div className="dq-usage-totals">
+              {[64, 88, 72].map((w, i) => (
+                <div key={i} className="dq-stat"><Skel w={w} h={11} /><Skel w={72} h={20} /></div>
+              ))}
+            </div>
+          ) : (
+            <div className="dq-empty">{t('vision.empty', { window: activeWindowName })}</div>
+          )}
+        </div>
+      ) : (
+        // Host serving a pre-vision payload (e.g. not restarted yet): hide the
+        // whole card instead of leaving a titled shell — it reappears as soon
+        // as the host half serves the new shape.
+        null
+      )}
+
       <div className="dq-card dq-card--primary">
         <div className="dq-card-head">
           <div className="dq-card-title">{t('usage.trendTitle')}</div>
@@ -1484,7 +1582,7 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
       <div className="dq-card">
         <div className="dq-card-title">{t('peak.title')}</div>
         {usage !== null ? (
-          <PeakCard split={usage.peakSplit} pricing={usage.pricing} currentCost={usage.totals.cost} />
+          <PeakCard split={usage.peakSplit} pricing={usage.pricing} />
         ) : loadingUsage ? (
           <>
             <div className="dq-peak-track" />

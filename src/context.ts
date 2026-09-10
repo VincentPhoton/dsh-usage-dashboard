@@ -37,6 +37,27 @@ export interface TokenUsageFace {
   reasoningTokens?: number
 }
 
+/** Structural face of an `image` content block's attachment ref — only the
+ *  fields the image-cost fold reads. Width/height drive the official token
+ *  estimate; bytes is reported raw. */
+export interface ImageAttachmentFace {
+  width?: number
+  height?: number
+  bytes?: number
+  name?: string
+  mediaType?: string
+}
+
+/** Structural face of one content block, recursive to cover image blocks
+ *  nested inside tool-result blocks (tool screenshots). */
+export interface ContentBlockFace {
+  type?: string
+  text?: string
+  attachment?: ImageAttachmentFace
+  toolCallId?: string
+  content?: ContentBlockFace[]
+}
+
 export interface SessionEventFace {
   type?: string
   time?: number
@@ -47,9 +68,12 @@ export interface SessionEventFace {
      * modern `assistant/message` events. Optional for legacy logs. */
     turn?: number
     step?: number
-    message?: { id?: string }
+    message?: { id?: string; content?: ContentBlockFace[] }
     /** Payload of a `session/title` event. */
     title?: string
+    /** Payload of a `user/message` event: the user message record itself,
+     *  whose content blocks may carry `image` blocks. */
+    content?: ContentBlockFace[]
   }
 }
 

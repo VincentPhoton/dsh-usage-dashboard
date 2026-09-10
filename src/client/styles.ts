@@ -46,9 +46,14 @@ export const css = `
 /* 卡片间距（此处 gap）刻意大于卡内小节间距（margin-top:12/14/16px 那一档），制造"卡片外疏、卡片内密"的
    疏密对比：24px 相对卡内最大档 16px 仍有 1.5 倍级差，相对常见档 12px 有 2 倍级差，不与 .dq-card 的
    padding（16px/20px，卡片内部呼吸感，轮次 36 已定）混同。 */
-.dq-balance{display:flex;flex-direction:column;gap:24px;padding:20px 24px 48px;max-width:860px;margin:0 auto;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#1f2328)}
+/* Width parity with the host composer: the dashboard column reserves the
+   same max-width as the conversation reading column (860px, 轮次 42 kept it
+   deliberately), but on narrower viewports the fixed 860px would overhang
+   the input box — measured in dashboard.tsx as --dq-composer-w, capped at
+   the reading-column width so wide viewports are unchanged. */
+.dq-balance{display:flex;flex-direction:column;gap:24px;padding:20px 24px 48px;max-width:min(860px,var(--dq-composer-w,860px));margin:0 auto;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,#1f2328)}
 @media (max-width:620px){.dq-balance{box-sizing:border-box;max-width:calc(100vw - 56px);padding:16px 16px calc(var(--dq-composer-h,126px) + 16px)}}
-.dq-card{background:var(--dsw-alias-bg-layer-1,#ffffff);border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08));border-radius:12px;padding:16px}
+.dq-card{background:var(--dsw-alias-bg-layer-1,#ffffff);border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08));border-radius:12px;padding:16px;min-width:0;max-width:100%}
 .dq-card-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#59636e);margin:0 0 12px;letter-spacing:.02em}
 .dq-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
 .dq-card-head .dq-card-title{margin:0}
@@ -290,6 +295,16 @@ p.dq-session-sub{margin:8px 0}
    case is the font-size drop below, which keeps every measured stress value comfortably under the
    83px column width without ever hitting the ellipsis fallback (see round 38 PROGRESS entry) */
 .dq-usage-totals .dq-stat-value{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dq-vision-share{display:inline-block;margin-left:6px;font-size:11px;font-weight:550;color:var(--dsw-alias-label-tertiary,#59636e)}
+.dq-vision-sessions{margin-top:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+/* The vision card's session rows reuse .dq-session-head, but — unlike the
+   ranking card's rows — they sit directly under .dq-session with no
+   .dq-session-summary-body wrapper to carry min-width:0. Without the chain
+   below, a long session title (nowrap) sets the row's min-content width and
+   can stretch the card past its siblings / the container. */
+.dq-vision-sessions .dq-session{min-width:0}
+.dq-vision-sessions .dq-session-head{min-width:0}
+.dq-vision-sessions .dq-session-title{flex:1 1 auto;min-width:0}
 @media (max-width:620px){.dq-usage-totals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 24px}.dq-usage-totals .dq-stat{min-width:0}.dq-usage-totals .dq-stat-value{font-size:13px}}
 .dq-chart-peak{margin-left:10px;font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#59636e);font-variant-numeric:tabular-nums}
 .dq-chart-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#59636e);margin:16px 0 8px}

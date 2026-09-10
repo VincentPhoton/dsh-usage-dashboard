@@ -7,9 +7,9 @@
  *   one record per `assistant/message` event, bucketed by local day / hour.
  */
 import { isValidSessionId, USAGE_WINDOW_DAYS } from './contract.ts'
-import type { BalanceResponse, ModelSeriesPoint, ModelUsage, PeakSplit, PeriodUsage, SessionCost, SessionModelUsage, SessionUsageResponse, UsageCoverage, UsageData, UsageResponse, UsageSummary, UsageWindowDays } from './contract.ts'
-import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from './context.ts'
-import { cacheSavingOf, costOf, costUnderPeakEra, isPeak, pricingInfo } from './pricing.ts'
+import type { BalanceResponse, ModelSeriesPoint, ModelUsage, PeakSplit, PeriodUsage, SessionCost, SessionModelUsage, SessionUsageResponse, UsageCoverage, UsageData, UsageResponse, UsageSummary, UsageWindowDays, VisionDayPoint, VisionSession, VisionStats } from './contract.ts'
+import type { ContentBlockFace, CredentialsFace, ImageAttachmentFace, SessionEventFace, SessionPersistenceFace } from './context.ts'
+import { cacheSavingOf, costOf, costUnderPeakEra, estimateImageTokens, isPeak, pricingInfo } from './pricing.ts'
 
 const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n))
 
@@ -91,6 +91,43 @@ function bump(map: Map<string, Bucket>, key: string, input: number, output: numb
 type OverallBucket = Bucket & { reasoning: number; cacheSavings: number }
 const emptyOverall = (): OverallBucket => ({ ...emptyBucket(), reasoning: 0, cacheSavings: 0 })
 
+/** Image usage folded one record at a time; `imageTokens`/`cost` are official-
+ *  rule estimates, `bytes` is the counted payload size when refs carry one. */
+interface VisionAcc {
+  images: number
+  imageTokens: number
+  cost: number
+  bytes: number
+}
+
+const emptyVision = (): VisionAcc => ({ images: 0, imageTokens: 0, cost: 0, bytes: 0 })
+
+function bumpVisionInto(
+  acc: VisionAcc,
+  images: number,
+  imageTokens: number,
+  cost: number,
+  bytes: number,
+): void {
+  acc.images += images
+  acc.imageTokens += imageTokens
+  acc.cost += cost
+  acc.bytes += bytes
+}
+
+function bumpVisionMap(
+  map: Map<string, VisionAcc>,
+  key: string,
+  images: number,
+  imageTokens: number,
+  cost: number,
+  bytes: number,
+): void {
+  const acc = map.get(key) ?? emptyVision()
+  bumpVisionInto(acc, images, imageTokens, cost, bytes)
+  map.set(key, acc)
+}
+
 interface WindowAccumulator {
   days: UsageWindowDays
   startKey: string
@@ -102,6 +139,9 @@ interface WindowAccumulator {
   modelDays: Map<string, Map<string, Bucket>>
   modelHours: Map<string, Map<string, Bucket>>
   sessions: SessionCost[]
+  vision: VisionAcc
+  visionDays: Map<string, VisionAcc>
+  visionSessions: Map<string, VisionAcc & { title: string }>
 }
 
 /** How many sessions the ranking keeps; the rest are summarised by count. */
@@ -162,6 +202,13 @@ function summarize(dayMap: Map<string, Bucket>, now: Date): UsageSummary {
  * `request/header` event (each request logs one before dispatch), so usage
  * can be attributed per model. Events without any preceding header fall back
  * to the `''`/`''` (unknown) bucket.
+ *
+ * Image blocks are collected alongside: `user/message` content and tool
+ * results (`tool/result`, screenshots from tools) may carry `image` blocks,
+ * and every pending image is attributed to the next usage record — the model
+ * call whose prompt actually carried it. Images followed by no usage record
+ * (the request failed or never ran) contribute nothing to the fold, since no
+ * model call was billed for them.
  */
 function addUsageEvent(
   events: SessionEventFace[] | undefined,
@@ -175,12 +222,14 @@ function addUsageEvent(
     model: string,
     messageId: string | undefined,
     turn: number | undefined,
+    images: ImageAttachmentFace[],
   ) => void,
 ): Pick<UsageCoverage, 'usageRecords' | 'skippedRecords'> {
   const result = { usageRecords: 0, skippedRecords: 0 }
   if (events === undefined) return result
   let provider = ''
   let model = ''
+  const pendingImages: ImageAttachmentFace[] = []
   for (const ev of events) {
     if (ev?.type === 'request/header') {
       const cfg = ev.data?.header?.config
@@ -190,6 +239,7 @@ function addUsageEvent(
       }
       continue
     }
+    pendingImages.push(...imagesInEvent(ev))
     if (ev?.type !== 'assistant/message') continue
     const usage = ev.data?.usage
     if (usage === undefined) continue
@@ -204,10 +254,37 @@ function addUsageEvent(
     const messageId = typeof rawMessageId === 'string' && rawMessageId !== '' ? rawMessageId : undefined
     const rawTurn = ev.data?.turn
     const turn = typeof rawTurn === 'number' && Number.isFinite(rawTurn) ? rawTurn : undefined
-    onEvent(ev.time, input, output, cache, reasoning, provider, model, messageId, turn)
+    onEvent(ev.time, input, output, cache, reasoning, provider, model, messageId, turn, pendingImages)
+    pendingImages.length = 0
     result.usageRecords += 1
   }
   return result
+}
+
+/** Every `image` attachment ref inside one content-block tree, including
+ *  blocks nested in tool-result blocks (`tool/result` screenshots). */
+function imageBlocks(blocks: ContentBlockFace[] | undefined): ImageAttachmentFace[] {
+  const found: ImageAttachmentFace[] = []
+  const walkAll = (items: ContentBlockFace[] | undefined): void => {
+    for (const item of items ?? []) {
+      if (item?.type === 'image' && item.attachment !== undefined && item.attachment !== null) {
+        found.push(item.attachment)
+      }
+      if (Array.isArray(item?.content)) walkAll(item.content)
+    }
+  }
+  walkAll(blocks)
+  return found
+}
+
+/** Image attachment refs carried by one event: `user/message` blocks at
+ *  `data.content`, `tool/result` blocks at `data.message.content`. */
+function imagesInEvent(ev: SessionEventFace | undefined): ImageAttachmentFace[] {
+  if (ev === undefined) return []
+  return [
+    ...imageBlocks(ev.data?.content),
+    ...imageBlocks(ev.data?.message?.content),
+  ]
 }
 
 export async function fetchUsage(persistence: SessionPersistenceFace | undefined, nowMs = Date.now()): Promise<UsageResponse> {
@@ -226,6 +303,11 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
   const modelDays = new Map<string, Map<string, Bucket>>()
   const modelHours = new Map<string, Map<string, Bucket>>()
   const sessions: SessionCost[] = []
+  // Image usage across everything the replay sees. Day-keyed series mirrors
+  // the daily bucket map; per-session tracks "which run kept sending pictures".
+  const vision = emptyVision()
+  const visionDays = new Map<string, VisionAcc>()
+  const visionSessions = new Map<string, VisionAcc & { title: string }>()
   const coverage: UsageCoverage = {
     scope: 'local-dsh-session-logs',
     listedSessions: 0,
@@ -236,7 +318,8 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
     earliestAt: null,
     latestAt: null,
   }
-  // Peak / off-peak split, plus the same usage re-priced under the new table.
+  // Peak / off-peak split, plus the same usage re-priced as if everything
+  // had landed in an idle window (the shift-off-peak saving).
   const peakSplit: PeakSplit = {
     peak: { total: 0, cost: 0, calls: 0 },
     offPeak: { total: 0, cost: 0, calls: 0 },
@@ -257,6 +340,9 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
     modelDays: new Map(),
     modelHours: new Map(),
     sessions: [],
+    vision: emptyVision(),
+    visionDays: new Map(),
+    visionSessions: new Map(),
   }))
 
   const bumpOverall = (
@@ -323,7 +409,9 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
       coverage.scannedSessions += 1
       const session: SessionCost = { id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }
       const windowSessions = windowAggregates.map((): SessionCost => ({ id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }))
-      const scanned = addUsageEvent(events, (time, input, output, cache, reasoning, provider, model) => {
+      const sessionVision: VisionAcc & { title: string } = { ...emptyVision(), title: '' }
+      const windowVisionSessions = windowAggregates.map((): VisionAcc & { title: string } => ({ ...emptyVision(), title: '' }))
+      const scanned = addUsageEvent(events, (time, input, output, cache, reasoning, provider, model, _messageId, _turn, images) => {
         if (coverage.earliestAt === null || time < coverage.earliestAt) coverage.earliestAt = time
         if (coverage.latestAt === null || time > coverage.latestAt) coverage.latestAt = time
         const d = new Date(time)
@@ -338,6 +426,31 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
         bumpModel(modelTotals, modelDays, modelHours, modelKey, dayKey, hourKey, input, output, cache, cost)
         bumpOverall(overall, input, output, cache, reasoning, cost, cacheSavings)
         bumpSession(session, time, eventTotal, cost)
+        // Image blocks ride the record that consumed them: estimated tokens
+        // (official resizing rule) priced at that call's cache-miss input rate.
+        if (images.length > 0) {
+          let imageTokensSum = 0
+          let imageCostSum = 0
+          let imageBytesSum = 0
+          for (const image of images) {
+            const width = typeof image.width === 'number' ? image.width : 0
+            const height = typeof image.height === 'number' ? image.height : 0
+            const tokens = estimateImageTokens(width, height)
+            imageTokensSum += tokens
+            imageCostSum += costOf(time, model, tokens, 0, 0)
+            imageBytesSum += typeof image.bytes === 'number' ? image.bytes : 0
+          }
+          bumpVisionInto(vision, images.length, imageTokensSum, imageCostSum, imageBytesSum)
+          bumpVisionMap(visionDays, dayKey, images.length, imageTokensSum, imageCostSum, imageBytesSum)
+          bumpVisionInto(sessionVision, images.length, imageTokensSum, imageCostSum, imageBytesSum)
+          for (let i = 0; i < windowAggregates.length; i++) {
+            const aggregate = windowAggregates[i]
+            if (dayKey < aggregate.startKey || dayKey > aggregate.endKey) continue
+            bumpVisionInto(aggregate.vision, images.length, imageTokensSum, imageCostSum, imageBytesSum)
+            bumpVisionMap(aggregate.visionDays, dayKey, images.length, imageTokensSum, imageCostSum, imageBytesSum)
+            bumpVisionInto(windowVisionSessions[i], images.length, imageTokensSum, imageCostSum, imageBytesSum)
+          }
+        }
         for (let i = 0; i < windowAggregates.length; i++) {
           const aggregate = windowAggregates[i]
           if (dayKey < aggregate.startKey || dayKey > aggregate.endKey) continue
@@ -365,6 +478,16 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
           if (windowSession.calls === 0) continue
           windowSession.title = title
           windowAggregates[i].sessions.push(windowSession)
+        }
+      }
+      if (sessionVision.images > 0) {
+        sessionVision.title = titleOf(events, sid)
+        visionSessions.set(sid, sessionVision)
+        for (let i = 0; i < windowAggregates.length; i++) {
+          const windowVision = windowVisionSessions[i]
+          if (windowVision.images === 0) continue
+          windowVision.title = sessionVision.title
+          windowAggregates[i].visionSessions.set(sid, windowVision)
         }
       }
     } catch {
@@ -438,6 +561,28 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
     heatmap.push({ date: key, total: b.total, cost: b.cost, calls: b.calls })
   }
 
+  const makeVisionDaily = (map: Map<string, VisionAcc>, count: number): VisionDayPoint[] => {
+    const result: VisionDayPoint[] = []
+    for (let i = count - 1; i >= 0; i--) {
+      const key = dayKeyOf(dateBefore(i))
+      const b = map.get(key) ?? emptyVision()
+      result.push({ date: key, images: b.images, imageTokens: b.imageTokens, cost: b.cost })
+    }
+    return result
+  }
+
+  const makeVisionSessions = (map: Map<string, VisionAcc & { title: string }>): VisionSession[] =>
+    [...map.entries()]
+      .map(([id, acc]) => ({
+        id,
+        title: acc.title !== '' ? acc.title : `会话 ${id.slice(0, 8)}`,
+        images: acc.images,
+        imageTokens: acc.imageTokens,
+        cost: acc.cost,
+      }))
+      .sort((a, b) => b.images - a.images)
+      .slice(0, SESSION_TOP_N)
+
   const models = makeModels(modelTotals, modelDays, modelHours, 30)
   const windows = windowAggregates.map(aggregate => ({
     days: aggregate.days,
@@ -447,6 +592,9 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
     models: makeModels(aggregate.modelTotals, aggregate.modelDays, aggregate.modelHours, aggregate.days),
     sessions: [...aggregate.sessions].sort((a, b) => b.cost - a.cost).slice(0, SESSION_TOP_N),
     sessionCount: aggregate.sessions.length,
+    vision: { ...aggregate.vision },
+    visionDaily: makeVisionDaily(aggregate.visionDays, aggregate.days),
+    visionSessions: makeVisionSessions(aggregate.visionSessions),
   }))
 
   return {
@@ -463,6 +611,9 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
       sessionCount: sessions.length,
       coverage,
       windows,
+      vision: { ...vision },
+      visionDaily: makeVisionDaily(visionDays, 30),
+      visionSessions: makeVisionSessions(visionSessions),
       totals: {
         input: overall.input,
         output: overall.output,
