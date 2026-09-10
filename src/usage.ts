@@ -8,7 +8,7 @@
  */
 import { isValidSessionId, USAGE_WINDOW_DAYS } from './contract.ts'
 import type { BalanceResponse, ModelSeriesPoint, ModelUsage, PeakSplit, PeriodUsage, SessionCost, SessionModelUsage, SessionUsageResponse, UsageCoverage, UsageData, UsageResponse, UsageSummary, UsageWindowDays, VisionDayPoint, VisionSession, VisionStats } from './contract.ts'
-import type { ContentBlockFace, CredentialsFace, ImageAttachmentFace, SessionEventFace, SessionPersistenceFace } from './context.ts'
+import type { ContentBlockFace, CredentialsFace, ImageAttachmentFace, SessionEventFace, SessionHeaderFace, SessionPersistenceFace } from './context.ts'
 import { cacheSavingOf, costOf, costUnderPeakEra, estimateImageTokens, isPeak, pricingInfo } from './pricing.ts'
 
 const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n))
@@ -287,9 +287,42 @@ function imagesInEvent(ev: SessionEventFace | undefined): ImageAttachmentFace[] 
   ]
 }
 
+/**
+ * Read one session's full event log across host generations. Handle-era DSH
+ * (the one without `readFrom`) exposes `open(id, 'read')` → slice reads that
+ * must be looped until an empty slice, then `close()`; legacy hosts returned
+ * the whole log from `readFrom(id, 0)`. One shared path so `fetchUsage` and
+ * `fetchSessionUsage` close the handle on every outcome, success or failure.
+ */
+async function readSessionEvents(persistence: SessionPersistenceFace, id: string): Promise<SessionEventFace[] | undefined> {
+  if (typeof persistence.open === 'function') {
+    const handle = await persistence.open(id, 'read')
+    try {
+      const events: SessionEventFace[] = []
+      for (;;) {
+        const slice = await handle.read(events.length)
+        const batch = slice.events ?? []
+        if (batch.length === 0) return events
+        // Loop, not spread: one slice can carry a whole long session and
+        // `push(...batch)` would overflow the call-argument stack.
+        for (const event of batch) events.push(event)
+      }
+    } finally {
+      // A read handle has nothing durable to drain, and a close failure
+      // must not mask the read's result or error.
+      try { await handle.close() } catch { /* nothing to drain */ }
+    }
+  }
+  if (persistence.readFrom === undefined) {
+    throw new Error('宿主 sessionPersistence 缺少 open() 与 readFrom()，无法读取会话日志')
+  }
+  const { events } = await persistence.readFrom(id, 0)
+  return events
+}
+
 export async function fetchUsage(persistence: SessionPersistenceFace | undefined, nowMs = Date.now()): Promise<UsageResponse> {
   if (persistence === undefined) return { ok: false, error: '会话持久化服务不可用' }
-  let headers: Array<{ id?: string; sessionId?: string }>
+  let headers: SessionHeaderFace[]
   try {
     headers = await persistence.list()
   } catch (err) {
@@ -399,13 +432,13 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
   }
 
   const sessionIds = headers
-    .map(header => header.id ?? header.sessionId)
+    .map(header => header.id ?? header.sessionId ?? header.header?.id ?? header.header?.sessionId)
     .filter((sid): sid is string => sid !== undefined && sid !== '')
   coverage.listedSessions = sessionIds.length
 
   for (const sid of sessionIds) {
     try {
-      const { events } = await persistence.readFrom(sid, 0)
+      const events = await readSessionEvents(persistence, sid)
       coverage.scannedSessions += 1
       const session: SessionCost = { id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }
       const windowSessions = windowAggregates.map((): SessionCost => ({ id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }))
@@ -646,8 +679,7 @@ export async function fetchSessionUsage(persistence: SessionPersistenceFace | un
 
   let events: SessionEventFace[] | undefined
   try {
-    const result = await persistence.readFrom(sessionId, 0)
-    events = result.events
+    events = await readSessionEvents(persistence, sessionId)
   } catch (err) {
     return { ok: false, error: `读取会话日志失败：${errorMessage(err)}` }
   }

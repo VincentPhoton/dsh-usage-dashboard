@@ -140,6 +140,9 @@ dsh plugin --profile web add ./path/to/dsh-usage-dashboard
 
 装好后打开 GUI，**进入任意一个会话**（「额度」tab 挂在 `conversation.view` 上，New Session 首页没有 tab 栏），顶部就能看到 `Chat / Trajectory / 额度`。
 
+> 兼容性：同时支持两代宿主接口——旧版 `readFrom(id, 0)` 与新版 handle 化 `open(id, 'read')` / `read` / `close`。
+> 宿主升级到移除 `readFrom` 的版本后，插件无需更换版本，会话日志照常重放。
+
 ## 费用是怎么算的
 
 费用是**估算**，不是账单。规则都在 [`src/pricing.ts`](src/pricing.ts) 一个文件里：

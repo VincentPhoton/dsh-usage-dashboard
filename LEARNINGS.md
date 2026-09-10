@@ -180,3 +180,14 @@
   是这条教训想禁止的事，"顺手重启服务"更是在这台已知有并发 session 共享同一个 `dsh.service` 的机器上
   把风险面不必要地放大（重启期间对方的验证/使用会被打断）。写代码时如果不确定改动是 client 端还是
   host 端、要不要重启，先查 LEARNINGS 里"部署差异"那条，不要凭感觉决定。
+- **宿主 DSH 是 developer preview，服务接口会破坏性重构——插件对同一个服务要按代兼容（feature-detect），
+  不要锚死单一版本**：上游把 `sessionPersistence` handle 化（`refactor(session-persistence)!`）后，`readFrom`
+  被移除、`list()` 改返回 snapshot（会话 id 移到 `snapshot.header.id`），插件所有基于会话日志的视图会一起报
+  `persistence.readFrom is not a function`。正确形状：`typeof persistence.open === 'function'` 时优先走新代
+  `open(id, 'read')`；`handle.read` 要**循环读到空片**（契约允许单次返回短于请求的分片），`close()` 放 `finally`
+  且其失败不掩盖读取结果；旧代回落 `readFrom(id, 0)`。一套代码同时兼容新旧宿主，别二选一。
+- **多个 view tab 共用宿主同一个滚动容器时，第三方 view 必须自己在挂载时置顶**：`[data-conversation-scroll]`
+  （`.scrollBody`）是 Chat / Trajectory / 额度 共用的 scrollport，宿主只为自家 Chat 做滚动记忆与恢复；切 tab 会
+  重挂载 view 但不重置 scrollTop，于是从滚到一半的 Chat 切进「额度」会停在设置卡片附近而不是账户余额。修复：
+  在 view 根节点 `useLayoutEffect`（绘制前执行）里 `rootRef.current.closest('[data-conversation-scroll]').scrollTop = 0`；
+  deps 带 `sessionId`，覆盖宿主复用同一 view 实例切换会话的情况。

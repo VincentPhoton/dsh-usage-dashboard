@@ -513,7 +513,7 @@ test('isValidSessionId whitelists a safe charset and rejects path-traversal-shap
 
   // Path separators, `..`, null bytes, and anything outside the safe
   // charset must all be rejected — this is what stands between a
-  // browser-controlled `?id=` and `persistence.readFrom`.
+  // browser-controlled `?id=` and the persistence read path.
   for (const bad of [
     '',
     '../../etc/passwd',
@@ -546,4 +546,102 @@ test('session usage rejects a malformed session id without touching persistence'
     ok: false,
     error: '会话 id 格式不合法',
   })
+})
+
+test('usage replay reads a handle-era persistence through chunked handle reads', async () => {
+  const now = localTime(21, 12)
+  const log: SessionEventFace[] = [
+    { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+    {
+      type: 'assistant/message',
+      time: localTime(21, 11),
+      data: { usage: { inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0 } },
+    },
+  ]
+  // One event per read, then the empty closing slice: only looping sees the
+  // whole log. No `readFrom` is what makes this a handle-era host.
+  const slices: SessionEventFace[][] = [log.slice(0, 1), log.slice(1), []]
+  let reads = 0
+  let closed = 0
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ header: { id: 'session-handle' } }],
+    open: async (id, access) => {
+      assert.equal(id, 'session-handle')
+      assert.equal(access, 'read')
+      return {
+        read: async (offset) => {
+          assert.equal(offset, reads)
+          const events = slices[reads] ?? []
+          reads += 1
+          return { events }
+        },
+        close: async () => { closed += 1 },
+      }
+    },
+  }
+
+  const response = await fetchUsage(persistence, now)
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  assert.equal(reads, 3)
+  assert.equal(closed, 1)
+  assert.equal(response.data.coverage.listedSessions, 1)
+  assert.equal(response.data.coverage.scannedSessions, 1)
+  assert.deepEqual(
+    { input: response.data.totals.input, output: response.data.totals.output, calls: response.data.totals.calls },
+    { input: 1_000, output: 100, calls: 1 },
+  )
+})
+
+test('a failed handle-era read still closes the handle and counts the session as failed', async () => {
+  let reads = 0
+  let closed = 0
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ header: { id: 'session-boom' } }],
+    open: async () => ({
+      read: async () => {
+        reads += 1
+        if (reads > 1) throw new Error('disk gone')
+        return {
+          events: [{ type: 'assistant/message', time: localTime(21, 10), data: { usage: { inputTokens: 10 } } }],
+        }
+      },
+      close: async () => { closed += 1 },
+    }),
+  }
+
+  const response = await fetchUsage(persistence, localTime(21, 12))
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  assert.equal(closed, 1)
+  assert.equal(response.data.coverage.failedSessions, 1)
+  assert.equal(response.data.coverage.scannedSessions, 0)
+  assert.equal(response.data.totals.calls, 0)
+})
+
+test('session usage reads a handle-era persistence through the same read path', async () => {
+  let reads = 0
+  let closed = 0
+  const slices: SessionEventFace[][] = [
+    [{ type: 'assistant/message', time: localTime(21, 10), data: { usage: { inputTokens: 10, outputTokens: 2 } } }],
+    [],
+  ]
+  const persistence: SessionPersistenceFace = {
+    list: async () => { throw new Error('fetchSessionUsage must not call list()') },
+    open: async () => ({
+      read: async () => {
+        const events = slices[reads] ?? []
+        reads += 1
+        return { events }
+      },
+      close: async () => { closed += 1 },
+    }),
+  }
+
+  const response = await fetchSessionUsage(persistence, 'session-handle')
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  assert.equal(closed, 1)
+  assert.equal(response.data.calls, 1)
+  assert.equal(response.data.total, 12)
 })

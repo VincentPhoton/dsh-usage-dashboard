@@ -28,6 +28,9 @@ export interface CredentialsFace {
 export interface SessionHeaderFace {
   id?: string
   sessionId?: string
+  /** Handle-era `list()` returns snapshots; the header (and its id) rides
+   *  one level deeper at `snapshot.header.id` instead of at the entry top. */
+  header?: SessionHeaderFace
 }
 
 export interface TokenUsageFace {
@@ -77,9 +80,18 @@ export interface SessionEventFace {
   }
 }
 
+/** One open read channel onto a session log (`SessionPersistence.open`). */
+export interface SessionHandleFace {
+  read(offset?: number, length?: number): Promise<{ events?: readonly SessionEventFace[] }>
+  close(): Promise<void>
+}
+
 export interface SessionPersistenceFace {
   list(): Promise<SessionHeaderFace[]>
-  readFrom(id: string, fromSeq: number): Promise<{ events?: SessionEventFace[] }>
+  /** Legacy hosts: whole-log read from a seq. Removed in handle-era DSH. */
+  readFrom?(id: string, fromSeq: number): Promise<{ events?: SessionEventFace[] }>
+  /** Handle-era hosts: per-session read handle, preferred when present. */
+  open?(id: string, access: 'read'): Promise<SessionHandleFace>
 }
 
 /** The host context this plugin's apply() receives. */
