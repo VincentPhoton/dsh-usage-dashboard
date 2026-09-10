@@ -237,7 +237,7 @@ function PricingNote(props: { pricing: PricingInfo }): ReactElement {
         </table>
         <p className="dq-pricing-foot">
           {t('pricing.unit', { currency: pricing.currency })}
-          {t('pricing.splitNote', { windows: pricing.peakWindows.join(t('common.listSeparator')), date: pricing.switchDate })}
+          {t('pricing.splitNote', { windows: pricing.peakWindows.join(t('common.listSeparator')) })}
           {t('pricing.visionNote')}
           {t('pricing.unknown')}
         </p>
