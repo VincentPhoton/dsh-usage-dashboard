@@ -269,6 +269,9 @@ p.dq-session-sub{margin:8px 0}
 .dq-setting-label{font-size:13px;color:var(--dsw-alias-label-primary,#1f2328);padding-top:6px;flex:none}
 .dq-setting-control{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
 .dq-setting-hint{font-size:12px;color:var(--dsw-alias-label-secondary,#59636e);line-height:1.5}
+/* Page footer: the package name + version, injected at build time from
+   package.json (see build.mjs) so it can never drift from the release. */
+.dq-footer{margin:18px 0 0;font-size:12px;text-align:center;color:var(--dsw-alias-label-tertiary,#59636e)}
 .dq-number{width:82px;padding:5px 8px;font-size:13px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.16));background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1f2328);font-variant-numeric:tabular-nums}
 .dq-number:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#0969da);outline-offset:1px;border-color:transparent}
 .dq-links-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1f2328);margin:0 0 8px}

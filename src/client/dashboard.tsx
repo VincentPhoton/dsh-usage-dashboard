@@ -19,6 +19,10 @@ import type { BalanceData, ModelUsage, PeakSplit, PeriodUsage, PricingInfo, Sess
 import { chartMetricStore, lowBalanceStore, monthlyBudgetStore, quotaViewActiveStore, usageWindowStore, widgetTabIdsStore, widgetVisibleStore } from './store.ts'
 import type { ConversationViewTab, ConversationViewsSource } from './views.ts'
 
+/** `<package name> v<version>`, injected by build.mjs from package.json so the
+ *  footer on the 额度 page reports exactly the version that was built. */
+declare const __PLUGIN_LABEL__: string
+
 /** Fallback composer height for the narrow-screen bottom safe area, used only
  *  until the real measurement below lands (or if the host markup ever stops
  *  exposing the `conversation.composer.dock` slot). DSH has no `--dsw-*`
@@ -1734,6 +1738,8 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
           </div>
         </div>
       </div>
+
+      <p className="dq-footer">{__PLUGIN_LABEL__}</p>
     </div>
   )
 }

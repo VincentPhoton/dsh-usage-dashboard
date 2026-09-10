@@ -93,6 +93,12 @@
 
 ## 已完成（续）
 
+- （轮次 50）`feat(dashboard)`: 额度页底部展示插件版本 footer（用户要求）。
+  - 版本串由 `build.mjs` 从 package.json 注入 esbuild define（`__PLUGIN_LABEL__` = `<包名> v<版本>`），
+    UI 不硬编码、发版自动跟随；`.dq-footer` 复用现有 12px 三级文字色档位，居中在「设置」卡之后。
+  - Verify：typecheck exit 0；57/57；build exit 0；Playwright 实测 footer 位于「设置」卡之后
+    （卡底 3459 → footer 3501）、文案 `@cassius0924/dsh-usage-dashboard v0.5.0`、控制台 0 错误。
+
 - （轮次 49）`fix(host)`: 适配 handle 化 sessionPersistence + 「额度」tab 挂载置顶——修复两个上游 issue。
   - 背景：用户转来两个 issue 一并修复。① #2（ysfl 提）：宿主把 `sessionPersistence` 重构为 handle 化
     （`refactor(session-persistence)!`：`readFrom` 移除，改 `open(id,'read')` → `handle.read(offset,length)`
