@@ -16,7 +16,7 @@ const usage = {
     today: { total: 35, cost: 0.125, calls: 2 }, yesterday: { total: 0, cost: 0, calls: 0 },
     month: { total: 35, cost: 0.125, calls: 2 }, lastMonthToDate: { total: 0, cost: 0, calls: 0 },
   },
-  pricing: { currency: 'CNY', switchDate: '2026-08-17', splitActive: false, inPeakNow: false, peakWindows: [], tiers: [] },
+  pricing: { currency: 'CNY', switchDate: '2026-08-17', inPeakNow: false, peakWindows: [], tiers: [] },
   peakSplit: {
     peak: { total: 0, cost: 0, calls: 0 }, offPeak: { total: 35, cost: 0.125, calls: 2 },
     peakEraCost: 0.25, offPeakEraCost: 0.125,
@@ -34,6 +34,9 @@ const usage = {
     latestAt: null,
   },
   windows: [],
+  vision: { images: 0, imageTokens: 0, cost: 0, bytes: 0 },
+  visionDaily: [],
+  visionSessions: [],
 } satisfies UsageData
 
 test('CSV cells quote separators and neutralize spreadsheet formulas', () => {

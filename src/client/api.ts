@@ -42,6 +42,11 @@ const usageIsUsable = (res: UsageResponse): boolean => {
     && USAGE_WINDOW_DAYS.every(days => data.windows.some(window => window.days === days))
     && data.windows.every(window => Array.isArray(window.daily)
       && Array.isArray(window.hourly) && Array.isArray(window.models) && Array.isArray(window.sessions))
+    && data.vision !== undefined && typeof data.vision.images === 'number'
+    && typeof data.vision.imageTokens === 'number' && typeof data.vision.cost === 'number'
+    && Array.isArray(data.visionDaily) && Array.isArray(data.visionSessions)
+    && data.windows.every(window => window.vision !== undefined
+      && Array.isArray(window.visionDaily) && Array.isArray(window.visionSessions))
     && data.totals !== undefined && typeof data.totals.cacheSavings === 'number'
     && data.summary?.today !== undefined
     && Array.isArray(data.pricing?.tiers)
@@ -111,9 +116,18 @@ export async function fetchUsage(force = false): Promise<UsageResponse> {
     if (usageInflight !== null) return usageInflight
   }
   const suffix = force ? '?refresh=1' : ''
-  const task = getJson<UsageResponse>(`/api/dsh-usage-dashboard/usage${suffix}`, force ? 'no-store' : 'default')
+  // `cache: 'no-store'` on every path, not just force: the host memoizes the
+  // expensive replay anyway, and our own TTL cache prevents repeat fetches —
+  // but the browser's HTTP cache would happily serve a payload captured before
+  // a host upgrade (the old body lacks fields the current UI reads, e.g. the
+  // vision block) for up to the max-age it was tagged with.
+  const task = getJson<UsageResponse>(`/api/dsh-usage-dashboard/usage${suffix}`, 'no-store')
     .then(res => {
-      if (res.ok) {
+      // Only shapes the current UI dereferences may enter the cache. A host
+      // still serving a pre-vision payload (not yet restarted) is therefore
+      // never persisted — the dashboard renders it defensively instead of
+      // crashing on the next mount.
+      if (res.ok && usageIsUsable(res)) {
         usageCache.put(res)
         for (const listener of [...usageListeners]) listener()
       }

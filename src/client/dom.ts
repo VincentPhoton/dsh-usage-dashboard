@@ -55,10 +55,43 @@ export function getShellFrame(node: HTMLElement | null): HTMLElement | null {
  *  0×0 slot wrapper), or null if the slot is not present in the current DOM
  *  (host markup changed, or mid-navigation). Callers that only need the box
  *  can call `.getBoundingClientRect()`; callers that want to observe size
- *  changes (e.g. `ResizeObserver`) need the element itself. */
+ *  changes (e.g. `ResizeObserver`) need the element itself.
+ *
+ *  `frame` may be null: the floating widget lives inside the shell overlay
+ *  subtree, but the dashboard's plugin root is mounted in the conversation
+ *  pane and cannot reach the shell frame that way. A frame-less call falls
+ *  back to a document-wide lookup — the composer is unique in the active
+ *  shell, so this cannot hit an ambiguous element. */
 export function getComposerElement(frame: HTMLElement | null): HTMLElement | null {
-  if (frame === null) return null
+  if (frame === null) {
+    return slotElement(document.documentElement, 'conversation.composer.dock', 'ancestor')
+  }
   return slotElement(frame, 'conversation.composer.dock', 'ancestor')
+}
+
+/**
+ * The composer's *input card* — the rounded panel that visually IS the input
+ * box (textarea + send row, ~780px max in DSH). The `.dock` seat found by
+ * {@link getComposerElement} spans the whole pane, so its width is the wrong
+ * answer for any width-parity goal: the visible input card is narrower, and
+ * it is the column the dashboard cards must align with. The card is located
+ * from the textarea's ancestor chain — the first ancestor with a visible
+ * background and a non-zero border radius, the shape DSH gives the input
+ * panel. Returns null when the host markup stops matching; callers then fall
+ * back to {@link getComposerElement}. */
+export function getComposerInputElement(frame: HTMLElement | null): HTMLElement | null {
+  const root = frame ?? document.documentElement
+  const textarea = root.querySelector(
+    '[data-slot="conversation.composer"] textarea, [data-slot="conversation.composer.bar"] textarea, textarea',
+  )
+  if (textarea === null) return null
+  let el = textarea.parentElement
+  for (let depth = 0; depth < 6 && el !== null; depth++) {
+    const cs = getComputedStyle(el)
+    if (cs.borderRadius !== '0px' && cs.backgroundColor !== 'rgba(0, 0, 0, 0)') return el
+    el = el.parentElement
+  }
+  return null
 }
 
 /** Resolve the active `conversation.view` id from the host's semantic tablist.

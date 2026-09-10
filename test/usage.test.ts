@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from '../src/context.ts'
 import { isValidSessionId } from '../src/contract.ts'
-import { cacheSavingOf, costOf, costUnderPeakEra } from '../src/pricing.ts'
+import { cacheSavingOf, costOf, costUnderPeakEra, estimateImageTokens } from '../src/pricing.ts'
 import { fetchBalance, fetchSessionUsage, fetchUsage } from '../src/usage.ts'
 
 const pad2 = (value: number): string => String(value).padStart(2, '0')
@@ -159,7 +159,99 @@ test('usage replay aggregates totals, periods, models, sessions, and pricing pro
     costUnderPeakEra(yesterday, 'deepseek-v4-pro', 1_000, 500, 200, true)
       + costUnderPeakEra(todayFlash, 'deepseek-v4-flash', 2_000, 1_000, 400, true)
       + costUnderPeakEra(todayUnknown, '', 10, 0, 5, true))
-  assert.equal(data.pricing.splitActive, false)
+  assert.deepEqual(data.vision, { images: 0, imageTokens: 0, cost: 0, bytes: 0 })
+})
+
+test('usage replay folds image blocks from user messages and tool results into vision stats', async () => {
+  const now = localTime(20, 16)
+  const attached = localTime(20, 13)
+  const consumed = localTime(20, 14)
+
+  const imageAttachment = (width: number, height: number, bytes: number) => ({
+    attachmentId: `att-${width}`, mediaType: 'image/png', width, height, bytes, name: 'shot.png',
+  })
+
+  const logs: Record<string, SessionEventFace[]> = {
+    'vision-session': [
+      { type: 'session/title', data: { title: '看图会话' } },
+      { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash-vision-exp' } } } },
+      {
+        type: 'user/message',
+        time: attached,
+        data: {
+          content: [
+            { type: 'text', text: '这是什么' },
+            { type: 'image', attachment: imageAttachment(800, 800, 1000) },
+          ],
+        },
+      },
+      {
+        type: 'tool/result',
+        time: attached,
+        data: {
+          message: {
+            id: 'message-tool',
+            content: [
+              { type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'image', attachment: imageAttachment(2000, 2000, 2000) }] },
+            ],
+          },
+        },
+      },
+      {
+        type: 'assistant/message',
+        time: consumed,
+        data: {
+          message: { id: 'message-knows' },
+          usage: { inputTokens: 1_000, outputTokens: 50 },
+        },
+      },
+      // Attached after the last usage record: never consumed, never folded.
+      { type: 'user/message', time: localTime(20, 15), data: { content: [{ type: 'image', attachment: imageAttachment(600, 600, 500) }] } },
+    ],
+  }
+
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ id: 'vision-session' }],
+    readFrom: async id => ({ events: logs[id] }),
+  }
+
+  const response = await fetchUsage(persistence, now)
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  const data = response.data
+
+  const imageTokens = estimateImageTokens(800, 800) + estimateImageTokens(2000, 2000)
+  const imageCost = costOf(consumed, 'deepseek-v4-flash-vision-exp', imageTokens, 0, 0)
+
+  assert.deepEqual(data.vision, {
+    images: 2,
+    imageTokens,
+    cost: imageCost,
+    bytes: 3000,
+  })
+
+  const todayVision = data.visionDaily.find(point => point.date === dayKey(consumed))
+  assert.deepEqual(todayVision && { images: todayVision.images, imageTokens: todayVision.imageTokens, cost: todayVision.cost }, {
+    images: 2,
+    imageTokens,
+    cost: imageCost,
+  })
+  assert.equal(data.visionDaily.filter(point => point.images > 0).length, 1)
+
+  assert.equal(data.visionSessions.length, 1)
+  assert.equal(data.visionSessions[0]?.id, 'vision-session')
+  assert.equal(data.visionSessions[0]?.title, '看图会话')
+  assert.equal(data.visionSessions[0]?.images, 2)
+
+  for (const window of data.windows) {
+    assert.equal(window.vision.images, 2, `window ${window.days}`)
+    assert.equal(window.visionSessions.length, 1, `window ${window.days}`)
+  }
+
+  // The vision record rides the normal usage aggregate unchanged.
+  assert.equal(data.totals.calls, 1)
+  assert.equal(data.totals.input, 1_000)
+  closeTo(data.totals.cost, costOf(consumed, 'deepseek-v4-flash-vision-exp', 1_000, 0, 50))
 })
 
 test('usage replay builds consistent 7, 30, 90, and 365 day windows', async () => {
