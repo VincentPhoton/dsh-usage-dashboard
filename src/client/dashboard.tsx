@@ -1017,6 +1017,20 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
     }
   }, [])
 
+  // All conversation view tabs (Chat / Trajectory / 额度 …) share one host
+  // scrollport (`[data-conversation-scroll]`), and the host keeps scroll
+  // memory only for Chat itself — switching to 额度 from a scrolled-down Chat
+  // otherwise opens the tab near the settings card instead of at the account
+  // balance. Reset before paint on every mount; the view is remounted per tab
+  // switch, and `sessionId` re-runs it if the host reuses the view for
+  // another session.
+  useLayoutEffect(() => {
+    const node = rootRef.current
+    if (node === null) return
+    const scrollport = node.closest('[data-conversation-scroll]')
+    if (scrollport instanceof HTMLElement) scrollport.scrollTop = 0
+  }, [props.sessionId])
+
   // The full dashboard and the floating summary should never compete for the
   // same pixels. This does not touch the persisted widget preference: leaving
   // the tab restores it exactly as the user left it.

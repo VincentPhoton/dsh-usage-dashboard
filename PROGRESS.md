@@ -93,6 +93,30 @@
 
 ## 已完成（续）
 
+- （轮次 49）`fix(host)`: 适配 handle 化 sessionPersistence + 「额度」tab 挂载置顶——修复两个上游 issue。
+  - 背景：用户转来两个 issue 一并修复。① #2（ysfl 提）：宿主把 `sessionPersistence` 重构为 handle 化
+    （`refactor(session-persistence)!`：`readFrom` 移除，改 `open(id,'read')` → `handle.read(offset,length)`
+    分片读 → `close()`；`list()` 返回 snapshot，会话 id 在 `snapshot.header.id`），插件 0.5.0 所有基于会话
+    日志的视图（今日/本月/累计、缓存节省、模型/会话排行、悬浮窗、可用天数）一起报
+    `persistence.readFrom is not a function`；余额（credentials + API）不受影响。② #1（VincentPhoton 提）：
+    Chat / Trajectory / 额度 共用宿主 `[data-conversation-scroll]` 滚动容器，宿主只给 Chat 保滚动记忆，
+    从底部滚动的 Chat 切到「额度」会停在设置卡附近而非顶部余额。
+  - Act：
+    1. `src/context.ts`：`SessionPersistenceFace` 按代兼容——`open?(id,'read'): SessionHandleFace`（新代，优先）
+       与 `readFrom?`（旧代保留）；`SessionHeaderFace` 增加嵌套 `header` 以承接 snapshot 形状。
+    2. `src/usage.ts`：新增 `readSessionEvents()` 统一读取路径：handle 时代循环读分片到空片、`finally` 中
+       `close()`（读句柄无持久缓冲，close 失败不掩盖读取结果）；旧宿主回落 `readFrom(id,0)`；`list()` 的 id
+       解析兼容 `entry.id / entry.sessionId / snapshot.header.id`。`fetchUsage` 与 `fetchSessionUsage` 共用。
+    3. `src/client/dashboard.tsx`：BalanceDashboard 挂载（及 `sessionId` 变化）时在 `useLayoutEffect`（绘制前）
+       把共享 scrollport 的 `scrollTop` 归零。
+    4. 注释同步（`src/index.ts`、`src/contract.ts`）；README 安装节补两代接口兼容说明；LEARNINGS 增加
+       「按代兼容」与「第三方 view 挂载置顶」两条教训。
+  - Verify：`pnpm run typecheck`（双 tsconfig）exit 0；`node test/run.mjs` 57/57（新增 3 条：分片循环读 + offset
+    连续、读失败仍 close 且计 failedSessions、fetchSessionUsage 同路径）；`pnpm run build` exit 0。本机 dsh 从
+    0.1.2-alpha.2 升级到 master `aa8262ec09`（0.1.5-rc.1）重启后实测：`/api/dsh-usage-dashboard/usage` 恢复
+    ok:true（915 条用量记录；扫描 21 / 22 个会话，唯一失败者是宿主拒读的 format v0 旧日志）；Playwright 实测
+    Chat 滚到底（scrollTop 5029）切「额度」→ 立即归 0 并停在余额卡；控制台 0 错误。
+
 - （轮次 48）`feat(dashboard)`: DeepSeek-V4-Flash-Vision-Exp 多模态用量卡 + 定价表升级 + 移除「涨价前」叙事。
   - 背景：2026-08-21 官方上线首个多模态模型 `deepseek-v4-flash-vision-exp`（图片 + 文本输入，DSH 目录
     `llm-deepseek` 已带 `inputModalities:['text','image']`，序列化层会把 durable 附件转成 data-URL）。

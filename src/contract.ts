@@ -217,11 +217,11 @@ export type UsageWindowDays = (typeof USAGE_WINDOW_DAYS)[number]
  * Session ids observed in this codebase (host-issued, e.g.
  * `session-484a1c14-c6fe-4d6a-abfd-a2d8d2f664d5`) are always plain
  * ASCII-safe tokens — no documented format contract exists for them outside
- * this repo (`SessionPersistenceFace`/`readFrom` is implemented by the DSH
- * host, not here), so this is a defensive charset whitelist rather than an
+ * this repo (`SessionPersistenceFace` is implemented by the DSH host, not
+ * here), so this is a defensive charset whitelist rather than an
  * exact-format check: letters, digits, `-`, `_` only, with a generous length
  * cap. It exists specifically to stop path-separator / `..` / null-byte
- * payloads from ever reaching `persistence.readFrom(id, 0)` — `id` on the
+ * payloads from ever reaching the session-log read — `id` on the
  * `/session` route arrives verbatim from the browser-controlled `?id=` query
  * parameter, unlike `fetchUsage()`'s session ids, which the host itself
  * enumerates via `persistence.list()`.
