@@ -70,7 +70,7 @@ export function apply(ctx: HostContext): void {
         // `id` arrives verbatim from the browser-controlled `?id=` query
         // parameter (unlike `usage`'s session ids, which the host itself
         // enumerates via `persistence.list()`), so a malformed value is
-        // rejected here — before it ever reaches `persistence.readFrom` —
+        // rejected here — before it ever reaches the persistence read path —
         // rather than trusted to fetchSessionUsage's own defense-in-depth
         // check. Reject as early as the route layer allows.
         if (id === null || id.trim() === '' || !isValidSessionId(id)) {

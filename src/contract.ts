@@ -114,16 +114,15 @@ export interface PricingRates {
 export interface PricingTier {
   model: string
   peak: PricingRates
-  /** Null while flat pricing is in effect (before the peak/off-peak switch). */
-  offPeak: PricingRates | null
+  offPeak: PricingRates
 }
 
 /** What the cost column was computed with, so the estimate can be audited. */
 export interface PricingInfo {
   currency: string
-  /** Date peak/off-peak pricing takes effect. */
+  /** Date peak/off-peak pricing took effect; earlier usage is costed at the
+   *  flat rates that were actually charged then. */
   switchDate: string
-  splitActive: boolean
   inPeakNow: boolean
   peakWindows: string[]
   tiers: PricingTier[]
@@ -131,9 +130,9 @@ export interface PricingInfo {
 
 /**
  * How usage divides between DeepSeek's peak and off-peak windows, plus the
- * same usage re-priced two ways — so the 2026-08-17 change can be answered
- * before it lands ("what will this cost me") and after ("what would shifting
- * off-peak save me").
+ * same usage re-priced as if everything had landed off-peak — answering
+ * "what would shifting batch work off-peak save me" under the peak/off-peak
+ * table in effect since 2026-08-17.
  */
 export interface PeakSplit {
   peak: PeriodUsage
@@ -154,6 +153,42 @@ export interface SessionCost {
   calls: number
   /** Epoch ms of the last usage record in this session. */
   lastActive: number
+}
+
+/**
+ * Multimodal (image) usage, folded from the same log replay: image blocks in
+ * user messages and tool results are counted and sized, then estimated with
+ * the official resizing rule (see `estimateImageTokens`). Each image is
+ * attributed to the next usage record — the model call whose prompt carried
+ * it — and priced at that call's input (cache-miss) rate, so the share answer
+ * "how much of the bill came from pictures" has a real number.
+ */
+export interface VisionStats {
+  /** Image blocks counted in the scope. */
+  images: number
+  /** Estimated image tokens under the official conversion rule. */
+  imageTokens: number
+  /** Estimated CNY cost of those image tokens at the consuming calls' rates. */
+  cost: number
+  /** Total image payload bytes when the attachment refs carried a size. */
+  bytes: number
+}
+
+/** One day's image usage for the per-window / per-day series. */
+export interface VisionDayPoint {
+  date: string
+  images: number
+  imageTokens: number
+  cost: number
+}
+
+/** One session's image usage, ranked for "which run kept sending pictures". */
+export interface VisionSession {
+  id: string
+  title: string
+  images: number
+  imageTokens: number
+  cost: number
 }
 
 /**
@@ -185,11 +220,11 @@ export type UsageWindowDays = (typeof USAGE_WINDOW_DAYS)[number]
  * Session ids observed in this codebase (host-issued, e.g.
  * `session-484a1c14-c6fe-4d6a-abfd-a2d8d2f664d5`) are always plain
  * ASCII-safe tokens — no documented format contract exists for them outside
- * this repo (`SessionPersistenceFace`/`readFrom` is implemented by the DSH
- * host, not here), so this is a defensive charset whitelist rather than an
+ * this repo (`SessionPersistenceFace` is implemented by the DSH host, not
+ * here), so this is a defensive charset whitelist rather than an
  * exact-format check: letters, digits, `-`, `_` only, with a generous length
  * cap. It exists specifically to stop path-separator / `..` / null-byte
- * payloads from ever reaching `persistence.readFrom(id, 0)` — `id` on the
+ * payloads from ever reaching the session-log read — `id` on the
  * `/session` route arrives verbatim from the browser-controlled `?id=` query
  * parameter, unlike `fetchUsage()`'s session ids, which the host itself
  * enumerates via `persistence.list()`.
@@ -209,6 +244,10 @@ export interface UsageWindow {
   sessions: SessionCost[]
   /** All sessions that contributed usage inside this window. */
   sessionCount: number
+  vision: VisionStats
+  visionDaily: VisionDayPoint[]
+  /** Sessions that sent the most images inside this window, capped. */
+  visionSessions: VisionSession[]
 }
 
 export interface UsageData {
@@ -226,6 +265,10 @@ export interface UsageData {
   sessionCount: number
   coverage: UsageCoverage
   windows: UsageWindow[]
+  vision: VisionStats
+  visionDaily: VisionDayPoint[]
+  /** Sessions that sent the most images, capped — see SESSION_TOP_N. */
+  visionSessions: VisionSession[]
 }
 
 export interface UsageResponse {

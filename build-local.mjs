@@ -6,7 +6,7 @@
 import { build } from 'esbuild'
 import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 
-const { name: packageName } = JSON.parse(readFileSync('package.json', 'utf8'))
+const { name: packageName, version: packageVersion } = JSON.parse(readFileSync('package.json', 'utf8'))
 
 rmSync('lib', { recursive: true, force: true })
 mkdirSync('lib', { recursive: true })
@@ -37,6 +37,8 @@ await build({
   sourcemap: true,
   jsx: 'automatic',
   external: [...dshExternal, 'react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+  // The 额度 page footer shows this label; it comes from package.json.
+  define: { __PLUGIN_LABEL__: JSON.stringify(`${packageName} v${packageVersion}`) },
   banner: {
     js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(packageName)}, factory: (require) => { var module = { exports: {} }; var exports = module.exports;`,
   },

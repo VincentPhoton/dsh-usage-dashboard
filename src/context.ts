@@ -28,6 +28,9 @@ export interface CredentialsFace {
 export interface SessionHeaderFace {
   id?: string
   sessionId?: string
+  /** Handle-era `list()` returns snapshots; the header (and its id) rides
+   *  one level deeper at `snapshot.header.id` instead of at the entry top. */
+  header?: SessionHeaderFace
 }
 
 export interface TokenUsageFace {
@@ -35,6 +38,27 @@ export interface TokenUsageFace {
   outputTokens?: number
   cacheReadTokens?: number
   reasoningTokens?: number
+}
+
+/** Structural face of an `image` content block's attachment ref — only the
+ *  fields the image-cost fold reads. Width/height drive the official token
+ *  estimate; bytes is reported raw. */
+export interface ImageAttachmentFace {
+  width?: number
+  height?: number
+  bytes?: number
+  name?: string
+  mediaType?: string
+}
+
+/** Structural face of one content block, recursive to cover image blocks
+ *  nested inside tool-result blocks (tool screenshots). */
+export interface ContentBlockFace {
+  type?: string
+  text?: string
+  attachment?: ImageAttachmentFace
+  toolCallId?: string
+  content?: ContentBlockFace[]
 }
 
 export interface SessionEventFace {
@@ -47,15 +71,27 @@ export interface SessionEventFace {
      * modern `assistant/message` events. Optional for legacy logs. */
     turn?: number
     step?: number
-    message?: { id?: string }
+    message?: { id?: string; content?: ContentBlockFace[] }
     /** Payload of a `session/title` event. */
     title?: string
+    /** Payload of a `user/message` event: the user message record itself,
+     *  whose content blocks may carry `image` blocks. */
+    content?: ContentBlockFace[]
   }
+}
+
+/** One open read channel onto a session log (`SessionPersistence.open`). */
+export interface SessionHandleFace {
+  read(offset?: number, length?: number): Promise<{ events?: readonly SessionEventFace[] }>
+  close(): Promise<void>
 }
 
 export interface SessionPersistenceFace {
   list(): Promise<SessionHeaderFace[]>
-  readFrom(id: string, fromSeq: number): Promise<{ events?: SessionEventFace[] }>
+  /** Legacy hosts: whole-log read from a seq. Removed in handle-era DSH. */
+  readFrom?(id: string, fromSeq: number): Promise<{ events?: SessionEventFace[] }>
+  /** Handle-era hosts: per-session read handle, preferred when present. */
+  open?(id: string, access: 'read'): Promise<SessionHandleFace>
 }
 
 /** The host context this plugin's apply() receives. */

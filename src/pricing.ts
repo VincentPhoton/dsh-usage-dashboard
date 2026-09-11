@@ -1,17 +1,28 @@
 /**
  * DeepSeek API price table and cost estimation.
  *
- * Two things the previous flat constant got wrong: every model was billed at
- * deepseek-v4-pro rates (flash is ~3x cheaper), and the 2026-08-17 switch to
- * peak/off-peak pricing was not modelled at all.
+ * Every record is priced with the table that was in force at the moment it was
+ * written — CNY per 1M tokens, from DeepSeek's official pricing page:
  *
- * Rates are CNY per 1M tokens, from DeepSeek's 2026-08-13 price announcement.
- * Peak windows are Beijing time 09:00–12:00 and 14:00–18:00 on workdays only:
- * weekends (Sat/Sun) and Chinese statutory holidays (法定节假日) are entirely
- * off-peak. Off-peak halves the input/output price; the cache-hit rate is the
- * same in both windows (see halved()). Usage recorded before the switch is
- * still costed at the old flat rates, so historical days keep the price that
- * was actually charged.
+ * - until 2026-08-17 00:00 Beijing: one flat price per model;
+ * - 2026-08-17 00:00: peak/off-peak pricing — peak windows 09:00–12:00 and
+ *   14:00–18:00 on workdays only, off-peak halves input/output;
+ * - 2026-09-10 12:00: the V4.1-Flash price cut (flash 0.04/2/8 peak);
+ * - 2026-09-14 12:00: `deepseek-v4-pro` requests are served by V4.1-Flash and
+ *   billed at Flash rates until a V4.1 Pro ships.
+ *
+ * Peak windows are Beijing time 09:00–12:00 and 14:00–18:00. Weekends (Sat/Sun)
+ * and Chinese statutory holidays (法定节假日) are entirely off-peak — verified
+ * against the Open Platform bill for 2026-08-22, a Saturday inside the era the
+ * announcement still described as "every day". Off-peak halves input/output
+ * only; the cache-hit rate is the same in both windows (see halved()), which is
+ * what makes these estimates line up with the platform bill.
+ *
+ * `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are legacy names for
+ * the model now published as `deepseek-flash`; both keep billing at Flash
+ * rates. Images cost tokens rather than a multiplier of their own: they are
+ * converted by size and priced together with the text tokens. Historical days
+ * therefore keep the price that was actually charged.
  *
  * Editing this table is the one place to touch when DeepSeek changes prices.
  * The holiday calendar lives in CN_HOLIDAYS below — add a new year when the
@@ -19,29 +30,71 @@
  */
 import type { PricingInfo, PricingRates } from './contract.ts'
 
-/** 2026-08-17 00:00 Beijing time (UTC+8), when peak/off-peak pricing starts. */
+/** 2026-08-17 00:00 Beijing time (UTC+8), when peak/off-peak pricing took effect. */
 export const PEAK_PRICING_FROM_MS = Date.UTC(2026, 7, 16, 16, 0, 0)
+
+/** 2026-09-10 12:00 Beijing, when the V4.1-Flash prices and the weekday-only
+ *  peak windows took effect. */
+export const V41_FLASH_PRICING_FROM_MS = Date.UTC(2026, 8, 10, 4, 0, 0)
+
+/** 2026-09-14 12:00 Beijing, from when `deepseek-v4-pro` requests are routed
+ *  to V4.1-Flash and billed at Flash rates. */
+export const PRO_ROUTED_TO_FLASH_FROM_MS = Date.UTC(2026, 8, 14, 4, 0, 0)
 
 /** Peak hours in Beijing time, as [startHour, endHour) pairs. */
 const PEAK_WINDOWS: Array<[number, number]> = [[9, 12], [14, 18]]
 
 const BEIJING_OFFSET_MS = 8 * 3_600_000
 
-type Tier = 'pro' | 'flash'
+type Tier = 'pro' | 'flash' | 'vision'
 
 /** Flat rates in effect until 2026-08-17. */
-const LEGACY_RATES: Record<Tier, PricingRates> = {
+const FLAT_RATES: Record<Tier, PricingRates> = {
   pro: { cacheHit: 0.025, input: 3, output: 6 },
   flash: { cacheHit: 0.02, input: 1, output: 2 },
+  // The vision model billed at flash rates from day one, so its pre-switch
+  // history is costed at the same flat prices as flash.
+  vision: { cacheHit: 0.02, input: 1, output: 2 },
 }
 
-/** Peak rates from 2026-08-17. Off-peak halves input/output only — the
+/** Peak rates from 2026-08-17; off-peak halves input/output only — the
  *  cache-hit rate is the same in both windows (verified against the Open
- *  Platform's actual bill: a Saturday's usage is ~96% cache-hit tokens and
- *  only the un-halved cache rate matches the charged amount). */
-const PEAK_RATES: Record<Tier, PricingRates> = {
+ *  Platform bill: the off-peak total only matches when the cache-hit rate
+ *  stays at its peak value). */
+const PEAK_RATES_08_17: Record<Tier, PricingRates> = {
   pro: { cacheHit: 0.3, input: 9, output: 27 },
   flash: { cacheHit: 0.1, input: 3, output: 9 },
+  // Official policy: the vision model is priced identically to flash; images
+  // cost tokens, not their own multiplier.
+  vision: { cacheHit: 0.1, input: 3, output: 9 },
+}
+
+/** Peak rates from 2026-09-10, the V4.1-Flash table; off-peak is half. */
+const PEAK_RATES_09_10: Record<Tier, PricingRates> = {
+  pro: { cacheHit: 0.3, input: 9, output: 27 },
+  flash: { cacheHit: 0.04, input: 2, output: 8 },
+  vision: { cacheHit: 0.04, input: 2, output: 8 },
+}
+
+/** One dated price table; `fromMs` is inclusive. */
+interface PriceEra {
+  readonly fromMs: number
+  readonly peak: Record<Tier, PricingRates>
+  /** Whether the peak windows apply Monday–Friday only. */
+  readonly weekdaysOnly: boolean
+}
+
+/** Oldest first — the last entry whose `fromMs` has passed is the one in force. */
+const PRICE_ERAS: readonly PriceEra[] = [
+  { fromMs: PEAK_PRICING_FROM_MS, peak: PEAK_RATES_08_17, weekdaysOnly: false },
+  { fromMs: V41_FLASH_PRICING_FROM_MS, peak: PEAK_RATES_09_10, weekdaysOnly: true },
+]
+
+/** The price table in force at a moment. */
+function eraAt(timeMs: number): PriceEra {
+  let era = PRICE_ERAS[0]
+  for (const candidate of PRICE_ERAS) if (timeMs >= candidate.fromMs) era = candidate
+  return era
 }
 
 /** Off-peak = peak with input/output halved; cache-hit price is unchanged. */
@@ -52,9 +105,46 @@ const halved = (rates: PricingRates): PricingRates => ({
 })
 
 /** Which price tier a model name falls into; anything unrecognised is billed
- *  as pro, the conservative (more expensive) guess. */
+ *  as pro, the conservative (more expensive) guess. Vision is matched first:
+ *  `deepseek-v4-flash-vision-exp` also contains "flash". */
 export function tierOf(model: string): Tier {
-  return model.toLowerCase().includes('flash') ? 'flash' : 'pro'
+  const name = model.toLowerCase()
+  if (name.includes('vision')) return 'vision'
+  if (name.includes('flash')) return 'flash'
+  return 'pro'
+}
+
+/** The tier a model actually bills at: from 2026-09-14 `deepseek-v4-pro`
+ *  requests are served by V4.1-Flash and charged the Flash price. */
+function billedTierOf(timeMs: number, model: string): Tier {
+  const tier = tierOf(model)
+  return tier === 'pro' && timeMs >= PRO_ROUTED_TO_FLASH_FROM_MS ? 'flash' : tier
+}
+
+/** Beijing-time Monday–Friday, which the peak windows honour from 2026-09-10. */
+function isBeijingWeekday(timeMs: number): boolean {
+  const day = new Date(timeMs + BEIJING_OFFSET_MS).getUTCDay()
+  return day >= 1 && day <= 5
+}
+
+/**
+ * Image token conversion (DeepSeek official rule, Vision guide):
+ * - Images below roughly 384×384 pixels are scaled UP preserving aspect
+ *   ratio; larger images are scaled DOWN so their pixel count is roughly that
+ *   of an 800×800 image.
+ * - Tokens are proportional to the (resized) pixel count, capped at 384
+ *   tokens per image, so 2000×2000 and 5000×5000 cost the same.
+ * - Each image is counted independently; `detail: low` caps at 512×512.
+ *
+ * The estimate is for the "how much came from images" breakdown; the exact
+ * provider count is already folded into the usage record's `inputTokens`.
+ * Returns tokens (possibly fractional) — 0 for missing/invalid dimensions.
+ */
+export function estimateImageTokens(width: number, height: number): number {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 0
+  const area = width * height
+  const scaledArea = Math.min(800 * 800, Math.max(384 * 384, area))
+  return 384 * (scaledArea / (800 * 800))
 }
 
 /** Whether a moment falls in a peak window, judged in Beijing time so the
@@ -71,8 +161,15 @@ export function tierOf(model: string): Tier {
 export function isPeak(timeMs: number): boolean {
   const beijing = new Date(timeMs + BEIJING_OFFSET_MS)
   const dow = beijing.getUTCDay()
+  // Weekends are off-peak in every era: the 2026-08-22 (Saturday) usage was
+  // charged at off-peak rates even though the announcement still said the
+  // windows applied every day.
   if (dow === 0 || dow === 6) return false
+  // Chinese statutory holidays are off-peak all day, whatever the weekday.
   if (isChineseHoliday(timeMs)) return false
+  // Redundant with the weekend rule above (weekdaysOnly eras are Mon–Fri);
+  // kept so the era flag and this predicate cannot drift apart.
+  if (eraAt(timeMs).weekdaysOnly && !isBeijingWeekday(timeMs)) return false
   const hour = beijing.getUTCHours()
   return PEAK_WINDOWS.some(([from, to]) => hour >= from && hour < to)
 }
@@ -128,9 +225,8 @@ function isChineseHoliday(timeMs: number): boolean {
 
 /** Rates applying to one model at one moment. */
 export function ratesAt(timeMs: number, model: string): PricingRates {
-  const tier = tierOf(model)
-  if (timeMs < PEAK_PRICING_FROM_MS) return LEGACY_RATES[tier]
-  const peak = PEAK_RATES[tier]
+  if (timeMs < PEAK_PRICING_FROM_MS) return FLAT_RATES[tierOf(model)]
+  const peak = eraAt(timeMs).peak[billedTierOf(timeMs, model)]
   return isPeak(timeMs) ? peak : halved(peak)
 }
 
@@ -152,30 +248,28 @@ export function costOf(timeMs: number, model: string, input: number, cache: numb
 }
 
 /**
- * The same record priced under the peak/off-peak table regardless of when it
- * happened — `forceOffPeak` prices it as if it had landed in an idle window.
- * Used to answer "what will the new pricing cost me" before the switch and
- * "what would shifting off-peak save" after it.
+ * The same record priced as if it had landed in an idle window — used to
+ * answer "what would shifting work off-peak save me". Prices come from the
+ * newest table, the one in force now: the question is about scheduling the
+ * next batch, not about re-pricing history.
  */
 export function costUnderPeakEra(timeMs: number, model: string, input: number, cache: number, output: number, forceOffPeak = false): number {
-  const peak = PEAK_RATES[tierOf(model)]
+  const peak = PRICE_ERAS[PRICE_ERAS.length - 1].peak[billedTierOf(timeMs, model)]
   const rates = !forceOffPeak && isPeak(timeMs) ? peak : halved(peak)
   return applyRates(rates, input, cache, output)
 }
 
-/** The price table to show the user, describing whatever is in effect now. */
+/** The price table to show the user: the two models the official docs list,
+ *  so the rows match the page they come from — legacy names, image tokens and
+ *  the pro routing live in the small print next to the table. */
 export function pricingInfo(nowMs: number): PricingInfo {
-  const split = nowMs >= PEAK_PRICING_FROM_MS
+  const era = eraAt(nowMs)
+  const row = (model: string, tier: Tier) => ({ model, peak: era.peak[tier], offPeak: halved(era.peak[tier]) })
   return {
     currency: 'CNY',
     switchDate: '2026-08-17',
-    splitActive: split,
-    inPeakNow: split && isPeak(nowMs),
+    inPeakNow: isPeak(nowMs),
     peakWindows: ['09:00–12:00', '14:00–18:00'],
-    tiers: (['pro', 'flash'] as Tier[]).map(tier => ({
-      model: tier === 'pro' ? 'deepseek-v4-pro' : 'deepseek-v4-flash',
-      peak: split ? PEAK_RATES[tier] : LEGACY_RATES[tier],
-      offPeak: split ? halved(PEAK_RATES[tier]) : null,
-    })),
+    tiers: [row('deepseek-flash', 'flash'), row('deepseek-v4-pro', 'pro')],
   }
 }

@@ -16,7 +16,7 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 // the handshake below must be the package's own name — derive it rather than
 // repeating it, or renaming the package silently unregisters the client half
 // (and stalls the boot graph waiting for a module that never arrives).
-const { name: packageName } = JSON.parse(readFileSync('package.json', 'utf8'))
+const { name: packageName, version: packageVersion } = JSON.parse(readFileSync('package.json', 'utf8'))
 
 rmSync('lib', { recursive: true, force: true })
 mkdirSync('lib', { recursive: true })
@@ -47,6 +47,9 @@ await build({
   sourcemap: true,
   jsx: 'automatic',
   external: [...dshExternal, 'react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+  // The 额度 page's version footer reads this; injecting it from package.json
+  // keeps the shown version in step with the published package.
+  define: { __PLUGIN_LABEL__: JSON.stringify(`${packageName} v${packageVersion}`) },
   banner: {
     js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(packageName)}, factory: (require) => { var module = { exports: {} }; var exports = module.exports;`,
   },

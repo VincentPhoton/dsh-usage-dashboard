@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from '../src/context.ts'
 import { isValidSessionId } from '../src/contract.ts'
-import { cacheSavingOf, costOf, costUnderPeakEra } from '../src/pricing.ts'
+import { cacheSavingOf, costOf, costUnderPeakEra, estimateImageTokens } from '../src/pricing.ts'
 import { fetchBalance, fetchSessionUsage, fetchUsage } from '../src/usage.ts'
 
 const pad2 = (value: number): string => String(value).padStart(2, '0')
@@ -162,7 +162,99 @@ test('usage replay aggregates totals, periods, models, sessions, and pricing pro
     costUnderPeakEra(yesterday, 'deepseek-v4-pro', 1_000, 500, 200, true)
       + costUnderPeakEra(todayFlash, 'deepseek-v4-flash', 2_000, 1_000, 400, true)
       + costUnderPeakEra(todayUnknown, '', 10, 0, 5, true))
-  assert.equal(data.pricing.splitActive, false)
+  assert.deepEqual(data.vision, { images: 0, imageTokens: 0, cost: 0, bytes: 0 })
+})
+
+test('usage replay folds image blocks from user messages and tool results into vision stats', async () => {
+  const now = localTime(20, 16)
+  const attached = localTime(20, 13)
+  const consumed = localTime(20, 14)
+
+  const imageAttachment = (width: number, height: number, bytes: number) => ({
+    attachmentId: `att-${width}`, mediaType: 'image/png', width, height, bytes, name: 'shot.png',
+  })
+
+  const logs: Record<string, SessionEventFace[]> = {
+    'vision-session': [
+      { type: 'session/title', data: { title: '看图会话' } },
+      { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash-vision-exp' } } } },
+      {
+        type: 'user/message',
+        time: attached,
+        data: {
+          content: [
+            { type: 'text', text: '这是什么' },
+            { type: 'image', attachment: imageAttachment(800, 800, 1000) },
+          ],
+        },
+      },
+      {
+        type: 'tool/result',
+        time: attached,
+        data: {
+          message: {
+            id: 'message-tool',
+            content: [
+              { type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'image', attachment: imageAttachment(2000, 2000, 2000) }] },
+            ],
+          },
+        },
+      },
+      {
+        type: 'assistant/message',
+        time: consumed,
+        data: {
+          message: { id: 'message-knows' },
+          usage: { inputTokens: 1_000, outputTokens: 50 },
+        },
+      },
+      // Attached after the last usage record: never consumed, never folded.
+      { type: 'user/message', time: localTime(20, 15), data: { content: [{ type: 'image', attachment: imageAttachment(600, 600, 500) }] } },
+    ],
+  }
+
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ id: 'vision-session' }],
+    readFrom: async id => ({ events: logs[id] }),
+  }
+
+  const response = await fetchUsage(persistence, now)
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  const data = response.data
+
+  const imageTokens = estimateImageTokens(800, 800) + estimateImageTokens(2000, 2000)
+  const imageCost = costOf(consumed, 'deepseek-v4-flash-vision-exp', imageTokens, 0, 0)
+
+  assert.deepEqual(data.vision, {
+    images: 2,
+    imageTokens,
+    cost: imageCost,
+    bytes: 3000,
+  })
+
+  const todayVision = data.visionDaily.find(point => point.date === dayKey(consumed))
+  assert.deepEqual(todayVision && { images: todayVision.images, imageTokens: todayVision.imageTokens, cost: todayVision.cost }, {
+    images: 2,
+    imageTokens,
+    cost: imageCost,
+  })
+  assert.equal(data.visionDaily.filter(point => point.images > 0).length, 1)
+
+  assert.equal(data.visionSessions.length, 1)
+  assert.equal(data.visionSessions[0]?.id, 'vision-session')
+  assert.equal(data.visionSessions[0]?.title, '看图会话')
+  assert.equal(data.visionSessions[0]?.images, 2)
+
+  for (const window of data.windows) {
+    assert.equal(window.vision.images, 2, `window ${window.days}`)
+    assert.equal(window.visionSessions.length, 1, `window ${window.days}`)
+  }
+
+  // The vision record rides the normal usage aggregate unchanged.
+  assert.equal(data.totals.calls, 1)
+  assert.equal(data.totals.input, 1_000)
+  closeTo(data.totals.cost, costOf(consumed, 'deepseek-v4-flash-vision-exp', 1_000, 0, 50))
 })
 
 test('subagent replay events are deduped across sessions by message id', async () => {
@@ -546,7 +638,7 @@ test('isValidSessionId whitelists a safe charset and rejects path-traversal-shap
 
   // Path separators, `..`, null bytes, and anything outside the safe
   // charset must all be rejected — this is what stands between a
-  // browser-controlled `?id=` and `persistence.readFrom`.
+  // browser-controlled `?id=` and the persistence read path.
   for (const bad of [
     '',
     '../../etc/passwd',
@@ -579,4 +671,102 @@ test('session usage rejects a malformed session id without touching persistence'
     ok: false,
     error: '会话 id 格式不合法',
   })
+})
+
+test('usage replay reads a handle-era persistence through chunked handle reads', async () => {
+  const now = localTime(21, 12)
+  const log: SessionEventFace[] = [
+    { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+    {
+      type: 'assistant/message',
+      time: localTime(21, 11),
+      data: { usage: { inputTokens: 1_000, outputTokens: 100, cacheReadTokens: 0 } },
+    },
+  ]
+  // One event per read, then the empty closing slice: only looping sees the
+  // whole log. No `readFrom` is what makes this a handle-era host.
+  const slices: SessionEventFace[][] = [log.slice(0, 1), log.slice(1), []]
+  let reads = 0
+  let closed = 0
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ header: { id: 'session-handle' } }],
+    open: async (id, access) => {
+      assert.equal(id, 'session-handle')
+      assert.equal(access, 'read')
+      return {
+        read: async (offset) => {
+          assert.equal(offset, reads)
+          const events = slices[reads] ?? []
+          reads += 1
+          return { events }
+        },
+        close: async () => { closed += 1 },
+      }
+    },
+  }
+
+  const response = await fetchUsage(persistence, now)
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  assert.equal(reads, 3)
+  assert.equal(closed, 1)
+  assert.equal(response.data.coverage.listedSessions, 1)
+  assert.equal(response.data.coverage.scannedSessions, 1)
+  assert.deepEqual(
+    { input: response.data.totals.input, output: response.data.totals.output, calls: response.data.totals.calls },
+    { input: 1_000, output: 100, calls: 1 },
+  )
+})
+
+test('a failed handle-era read still closes the handle and counts the session as failed', async () => {
+  let reads = 0
+  let closed = 0
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ header: { id: 'session-boom' } }],
+    open: async () => ({
+      read: async () => {
+        reads += 1
+        if (reads > 1) throw new Error('disk gone')
+        return {
+          events: [{ type: 'assistant/message', time: localTime(21, 10), data: { usage: { inputTokens: 10 } } }],
+        }
+      },
+      close: async () => { closed += 1 },
+    }),
+  }
+
+  const response = await fetchUsage(persistence, localTime(21, 12))
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  assert.equal(closed, 1)
+  assert.equal(response.data.coverage.failedSessions, 1)
+  assert.equal(response.data.coverage.scannedSessions, 0)
+  assert.equal(response.data.totals.calls, 0)
+})
+
+test('session usage reads a handle-era persistence through the same read path', async () => {
+  let reads = 0
+  let closed = 0
+  const slices: SessionEventFace[][] = [
+    [{ type: 'assistant/message', time: localTime(21, 10), data: { usage: { inputTokens: 10, outputTokens: 2 } } }],
+    [],
+  ]
+  const persistence: SessionPersistenceFace = {
+    list: async () => { throw new Error('fetchSessionUsage must not call list()') },
+    open: async () => ({
+      read: async () => {
+        const events = slices[reads] ?? []
+        reads += 1
+        return { events }
+      },
+      close: async () => { closed += 1 },
+    }),
+  }
+
+  const response = await fetchSessionUsage(persistence, 'session-handle')
+  assert.equal(response.ok, true)
+  assert.ok(response.data)
+  assert.equal(closed, 1)
+  assert.equal(response.data.calls, 1)
+  assert.equal(response.data.total, 12)
 })
