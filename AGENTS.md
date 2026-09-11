@@ -16,8 +16,8 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 / 提交 | `0.6.0` / `7e49590`（合并上游 0.6.0 → 官方价格表对齐 → 文档） |
-| 测试 | `node test/run.mjs` → **71/71** |
+| 版本 / 提交 | `0.6.0` / 见 `git log -1`（合并上游 0.6.0 → 官方价格表对齐 → 文档 → 性能与逻辑优化） |
+| 测试 | `node test/run.mjs` → **89/89** |
 | 宿主 | DSH `0.1.5-rc.1`（`sessionPersistence` 已 handle 化，插件按代兼容新旧接口） |
 | 部署位置 | `~/.dsh/profiles/web/node_modules/@cassius0924/dsh-usage-dashboard/` |
 | 还原点 | tag `fork-before-0.6.0-20260911-182327`；备份 `dsh-auto-20260911-182629`、`dsh-auto-20260911-184217` |
@@ -26,6 +26,8 @@
 ## 硬规则（违反会出事）
 
 1. 改完跑 `pnpm run build`（或只改 JS 时 `node build-local.mjs`）+ `node test/run.mjs`。
+   ⚠️ 动 `src/usage.ts` 的缓存部分前先读《修正记录.md》§九-4：缓存只在宿主给出 `revision` 时生效，
+   且 `revision` 仅在**同一 service 实例 + 同一会话 id**内可比；测试用 `clearFoldCache()` 隔离。
 2. 部署 = **复制**（构建产生新 inode，pnpm 的硬链接失效，`pnpm install` **不会**刷新）：
    ```bash
    SRC=~/Documents/dsh-usage-dashboard
@@ -43,8 +45,11 @@
 1. **闲时减半规则**由 `PriceEra.halveCacheHit` 控制：**09-10 及以后 = `true`**（官方："空闲时段价格为高峰时段价格的一半"，
    三项全减半，含缓存命中价）；**08-17 – 09-10 档 = `false`**（当年按实际账单核对出的"缓存命中价不减半"，用它会低估约 27%）。
 2. **周末 + 法定节假日全天闲时**：官方原文字面只写"周一至周五"；节假日这一条是本 fork 的额外口径，**尚无账单验证**。
-3. **fork 独有**：跨会话 `messageId` 去重（子代理回放会让调用数虚高约 3 倍）、余额差值法「今日消耗（平台核算）」、
-   跨天自动重置、凭证解析 10s 有界超时、额度页白屏轻推。
+3. **fork 独有**：跨会话 `messageId` 去重（子代理回放会让调用数虚高约 3 倍；归属按
+   `delegationDepth → createdAt → id` 升序取祖先副本，**不再依赖 `list()` 顺序**）、
+   余额差值法「今日消耗（平台核算）」、跨天自动重置（跨午夜取午夜前 15 分钟内的样本，否则标 `estimated`）、
+   凭证解析 10s 有界超时、额度页白屏轻推、**revision 增量折叠缓存**（`src/session-cache.ts`；`/usage` 与
+   `/session` 共用；**没有 revision 就绝不缓存**，老宿主行为不变）。
 4. 官方价格页 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing/>：本机 **`curl` 能抓**，
    而 `web_fetch` 会被"非公网 IP"拦掉——要核对价格就用 curl。
 
@@ -58,7 +63,7 @@
 ## 常用命令
 
 ```bash
-node test/run.mjs            # 71/71
+node test/run.mjs            # 89/89
 pnpm run build               # esbuild + tsc 声明（注入版本 footer）
 node build-local.mjs         # 只构建 JS，跳过 tsc
 git log --oneline -20

@@ -235,7 +235,10 @@ export function GroupedBars(props: {
             >
               <div className="dq-bar-group">
                 {series.map((s, seriesIndex) => {
-                  const datum = s.bars[i]
+                  // Series lengths are expected to match (every model carries one
+                  // point per slot), but a malformed payload must not take the
+                  // whole tab down through the error boundary.
+                  const datum = s.bars[i] ?? { label: '', value: 0 }
                   const h = Math.max(1, Math.round((datum.value / scale) * height))
                   const text = datum.title ?? `${s.key}: ${datum.value.toLocaleString()}`
                   const pointIndex = i * series.length + seriesIndex
@@ -260,7 +263,7 @@ export function GroupedBars(props: {
                 })}
               </div>
               <div className="dq-bar-label" style={{ visibility: i % labelEvery === 0 ? 'visible' : 'hidden' }}>
-                {series[0].bars[i].label}
+                {series[0].bars[i]?.label ?? ''}
               </div>
             </div>
           ))}

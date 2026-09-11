@@ -6,9 +6,10 @@
  *
  * - `get()` serves a successful cached response while it is within `ttlMs`,
  *   otherwise recomputes;
- * - `refresh()` recomputes unconditionally and reseeds the cache;
- * - concurrent recomputes (of either kind) are deduped into one upstream
- *   call;
+ * - `refresh()` recomputes unconditionally and reseeds the cache, superseding
+ *   any compute already in flight (the user asked for a bypass, so joining an
+ *   older computation would hand back exactly what they were bypassing);
+ * - concurrent recomputes of the same kind are deduped into one upstream call;
  * - `ok:false` responses are never cached, so a transient failure is retried
  *   on the next request.
  *
@@ -33,16 +34,25 @@ export interface Memo<T> {
 export function memoize<T extends { ok: boolean }>(ttlMs: number, compute: () => Promise<T>): Memo<T> {
   const state: MemoState<T> = { entry: undefined, inflight: undefined }
 
-  const run = (): Promise<T> => {
-    if (state.inflight !== undefined) return state.inflight
+  /**
+   * Start a compute and take ownership of `inflight`. Only the newest
+   * computation owns the slot and the cache: a superseded one must neither
+   * clear the slot (a later caller would start a redundant third compute) nor
+   * seed its value, because "finishes later" does not mean "is fresher" — a
+   * slow superseded replay landing after a fast refresh would otherwise
+   * overwrite the newer response with staler data.
+   */
+  const start = (): Promise<T> => {
     const task = compute().then(
       (value) => {
-        state.inflight = undefined
-        if (value.ok) state.entry = { value, setAt: Date.now() }
+        if (state.inflight === task) {
+          state.inflight = undefined
+          if (value.ok) state.entry = { value, setAt: Date.now() }
+        }
         return value
       },
       (err: unknown) => {
-        state.inflight = undefined
+        if (state.inflight === task) state.inflight = undefined
         throw err
       },
     )
@@ -56,8 +66,12 @@ export function memoize<T extends { ok: boolean }>(ttlMs: number, compute: () =>
       if (hit !== undefined && hit.value.ok && Date.now() - hit.setAt < ttlMs) {
         return Promise.resolve(hit.value)
       }
-      return run()
+      // Join whatever compute is already running rather than starting a second.
+      return state.inflight ?? start()
     },
-    refresh: () => run(),
+    // An explicit refresh must not be answered with a computation that started
+    // before the user asked: it supersedes the in-flight one and returns its
+    // own result.
+    refresh: () => start(),
   }
 }

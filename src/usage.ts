@@ -11,6 +11,7 @@ import type { BalanceResponse, ModelSeriesPoint, ModelUsage, PeakSplit, PeriodUs
 import type { ContentBlockFace, CredentialsFace, ImageAttachmentFace, SessionEventFace, SessionHeaderFace, SessionPersistenceFace } from './context.ts'
 import { cacheSavingOf, costOf, costUnderPeakEra, estimateImageTokens, isPeak, pricingInfo } from './pricing.ts'
 import { trackDailyConsumption } from './balance-tracker.ts'
+import { createRevisionCache, type RevisionCache } from './session-cache.ts'
 
 const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n))
 
@@ -76,12 +77,16 @@ export async function fetchBalance(credentials: CredentialsFace | undefined, sta
     granted: b.granted_balance ?? '0',
     toppedUp: b.topped_up_balance ?? '0',
   }))
+  // Platform-accounted daily consumption, folded from the balance delta. See
+  // balance-tracker.ts for how the day's baseline is chosen.
+  const daily = trackDailyConsumption(balances, Date.now(), statePath)
   return {
     ok: true,
     data: {
       isAvailable: p.is_available === true,
       balances,
-      todayConsumed: trackDailyConsumption(balances, Date.now(), statePath),
+      todayConsumed: daily.consumed,
+      todayConsumedEstimated: daily.estimated,
     },
   }
 }
@@ -172,20 +177,71 @@ interface WindowAccumulator {
 const SESSION_TOP_N = 6
 
 /**
- * The session's own title, folded from its log: `session/title` events are
- * append-only and the last one wins. It rides along with the usage replay, so
- * naming a session costs no extra read.
+ * One billed model call, reduced to the fields every aggregation needs.
+ *
+ * This is the unit the fold cache stores: ~1 record per `assistant/message`
+ * event rather than the whole event (which also carries every message body and
+ * tool payload). Caching these is what makes an unchanged session cost nothing
+ * on the next replay, since reading a log means decompressing and JSON-parsing
+ * every event in it.
+ *
+ * Image usage is pre-summed per record because the estimate depends only on the
+ * attachment dimensions; the *cost* of those tokens is priced at merge time,
+ * where the record's time and model are already being priced anyway.
  */
-function titleOf(events: SessionEventFace[] | undefined, id: string): string {
-  let title = ''
-  if (events !== undefined) {
-    for (const ev of events) {
-      if (ev?.type !== 'session/title') continue
-      const next = ev.data?.title
-      if (typeof next === 'string' && next !== '') title = next
-    }
-  }
-  return title !== '' ? title : `会话 ${id.slice(0, 8)}`
+interface FoldedRecord {
+  time: number
+  provider: string
+  model: string
+  input: number
+  output: number
+  cache: number
+  reasoning: number
+  messageId: string | undefined
+  turn: number | undefined
+  /** Images carried by this call's prompt. */
+  images: number
+  imageTokens: number
+  imageBytes: number
+}
+
+/** One session's folded log: everything the two endpoints derive from it. */
+interface FoldedSession {
+  /** Last `session/title` value seen, or '' when the log has none. */
+  title: string
+  records: FoldedRecord[]
+  usageRecords: number
+  skippedRecords: number
+}
+
+/** One session to replay: identity plus the metadata that orders and caches it. */
+interface SessionEntry {
+  id: string
+  /** Opaque change token; undefined when the host cannot provide one. */
+  revision: string | undefined
+  /** 0 for a top-level session, parent depth + 1 for a subagent child. */
+  delegationDepth: number
+  createdAt: number
+}
+
+/**
+ * Bound on the folded records held by the cache, not on sessions: a session's
+ * cost is proportional to its call count, so this is the figure that actually
+ * bounds memory. ~120k records is a few tens of MB and far beyond what a
+ * dashboard tour touches; entries are dropped least-recently-used.
+ */
+const FOLD_CACHE_MAX_RECORDS = 120_000
+
+/** Shared by both endpoints: /usage replays every log, /session exactly one. */
+const foldCache: RevisionCache<FoldedSession> = createRevisionCache(FOLD_CACHE_MAX_RECORDS)
+
+/**
+ * Drop every cached fold. Test seam only: the cache is keyed by session id and
+ * revision, and unit tests reuse ids with hand-written revisions, so a stale
+ * entry from an earlier test could otherwise be served as a valid hit.
+ */
+export function clearFoldCache(): void {
+  foldCache.retainOnly([])
 }
 
 const dayKeyOf = (d: Date): string => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
@@ -221,11 +277,12 @@ function summarize(dayMap: Map<string, Bucket>, now: Date): UsageSummary {
 }
 
 /**
- * Fold usage out of one session's event log. The model for every
- * `assistant/message` usage record is the one from the latest preceding
- * `request/header` event (each request logs one before dispatch), so usage
- * can be attributed per model. Events without any preceding header fall back
- * to the `''`/`''` (unknown) bucket.
+ * Fold one session's event log into compact records.
+ *
+ * The model for every `assistant/message` usage record is the one from the
+ * latest preceding `request/header` event (each request logs one before
+ * dispatch), so usage can be attributed per model. Events without any
+ * preceding header fall back to the `''`/`''` (unknown) bucket.
  *
  * Image blocks are collected alongside: `user/message` content and tool
  * results (`tool/result`, screenshots from tools) may carry `image` blocks,
@@ -233,28 +290,24 @@ function summarize(dayMap: Map<string, Bucket>, now: Date): UsageSummary {
  * call whose prompt actually carried it. Images followed by no usage record
  * (the request failed or never ran) contribute nothing to the fold, since no
  * model call was billed for them.
+ *
+ * The result carries no timestamps beyond each record's own, because nothing
+ * downstream needs session-level bounds; `fetchUsage` derives its coverage
+ * range from the records it actually counts.
  */
-function addUsageEvent(
-  events: SessionEventFace[] | undefined,
-  onEvent: (
-    time: number,
-    input: number,
-    output: number,
-    cache: number,
-    reasoning: number,
-    provider: string,
-    model: string,
-    messageId: string | undefined,
-    turn: number | undefined,
-    images: ImageAttachmentFace[],
-  ) => void,
-): Pick<UsageCoverage, 'usageRecords' | 'skippedRecords'> {
-  const result = { usageRecords: 0, skippedRecords: 0 }
-  if (events === undefined) return result
+function foldSession(events: SessionEventFace[] | undefined): FoldedSession {
+  const fold: FoldedSession = { title: '', records: [], usageRecords: 0, skippedRecords: 0 }
+  if (events === undefined) return fold
   let provider = ''
   let model = ''
   const pendingImages: ImageAttachmentFace[] = []
   for (const ev of events) {
+    if (ev?.type === 'session/title') {
+      // Append-only; the last one wins.
+      const next = ev.data?.title
+      if (typeof next === 'string' && next !== '') fold.title = next
+      continue
+    }
     if (ev?.type === 'request/header') {
       const cfg = ev.data?.header?.config
       if (cfg?.provider !== undefined && cfg?.model !== undefined) {
@@ -270,7 +323,7 @@ function addUsageEvent(
     const values = [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.reasoningTokens]
       .map(value => value === undefined ? 0 : Number(value))
     if (typeof ev.time !== 'number' || !Number.isFinite(ev.time) || values.some(value => !Number.isFinite(value) || value < 0)) {
-      result.skippedRecords += 1
+      fold.skippedRecords += 1
       continue
     }
     const [input = 0, output = 0, cache = 0, reasoning = 0] = values
@@ -278,11 +331,25 @@ function addUsageEvent(
     const messageId = typeof rawMessageId === 'string' && rawMessageId !== '' ? rawMessageId : undefined
     const rawTurn = ev.data?.turn
     const turn = typeof rawTurn === 'number' && Number.isFinite(rawTurn) ? rawTurn : undefined
-    onEvent(ev.time, input, output, cache, reasoning, provider, model, messageId, turn, pendingImages)
+    let images = 0
+    let imageTokens = 0
+    let imageBytes = 0
+    for (const image of pendingImages) {
+      images += 1
+      imageTokens += estimateImageTokens(
+        typeof image.width === 'number' ? image.width : 0,
+        typeof image.height === 'number' ? image.height : 0,
+      )
+      imageBytes += typeof image.bytes === 'number' ? image.bytes : 0
+    }
     pendingImages.length = 0
-    result.usageRecords += 1
+    fold.records.push({
+      time: ev.time, provider, model, input, output, cache, reasoning, messageId, turn,
+      images, imageTokens, imageBytes,
+    })
+    fold.usageRecords += 1
   }
-  return result
+  return fold
 }
 
 /** Every `image` attachment ref inside one content-block tree, including
@@ -342,6 +409,79 @@ async function readSessionEvents(persistence: SessionPersistenceFace, id: string
   }
   const { events } = await persistence.readFrom(id, 0)
   return events
+}
+
+/**
+ * Normalise `list()` into the sessions to replay, and fix their order.
+ *
+ * Two things happen here that the endpoint depends on:
+ *
+ * 1. **Deduplication of the id list** — nothing forbids the host from listing a
+ *    session twice, and a repeat would only cost a second read.
+ * 2. **A deterministic ancestor-first order.** The host promises no order at
+ *    all (`list()` is documented "in no promised order"), yet the cross-session
+ *    message-id dedupe below is first-copy-wins. With an unordered list, which
+ *    session got credited for a call — and which sessions vanished from the
+ *    ranking entirely, since a session with no unique calls is dropped — could
+ *    change between two identical replays. On-disk logs show why depth is the
+ *    right key: a subagent session is *seeded* with its ancestor's event prefix,
+ *    so one billed call appears in several logs at the same seq, and the copy
+ *    belonging to the lowest-depth session is the one that actually made the
+ *    call. `createdAt` and the id only break ties.
+ */
+function sessionEntries(headers: SessionHeaderFace[]): SessionEntry[] {
+  const seen = new Set<string>()
+  const entries: SessionEntry[] = []
+  for (const listed of headers) {
+    const header = listed.header ?? listed
+    const id = header.id ?? header.sessionId ?? listed.id ?? listed.sessionId
+    if (id === undefined || id === '') continue
+    if (seen.has(id)) continue
+    seen.add(id)
+    const revision = listed.revision ?? header.revision
+    entries.push({
+      id,
+      revision: typeof revision === 'string' && revision !== '' ? revision : undefined,
+      delegationDepth: Number.isFinite(header.delegationDepth) ? Number(header.delegationDepth) : 0,
+      createdAt: Number.isFinite(header.createdAt) ? Number(header.createdAt) : 0,
+    })
+  }
+  entries.sort((a, b) =>
+    a.delegationDepth - b.delegationDepth
+    || a.createdAt - b.createdAt
+    || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return entries
+}
+
+/**
+ * The fold for one session, from the cache when its revision still matches and
+ * from a fresh read otherwise. `foldCache` never stores or serves an entry
+ * without a revision, so a host that cannot report one keeps the old
+ * always-re-read behaviour instead of being served a stale fold.
+ */
+async function foldOf(persistence: SessionPersistenceFace, entry: SessionEntry): Promise<FoldedSession> {
+  const cached = foldCache.get(entry.id, entry.revision)
+  if (cached !== undefined) return cached
+  const fold = foldSession(await readSessionEvents(persistence, entry.id))
+  foldCache.set(entry.id, entry.revision, fold, fold.records.length)
+  return fold
+}
+
+/**
+ * Metadata-only revision for one session, used by the single-session endpoint
+ * (which does not list). Undefined when the host has no `stat` or does not
+ * report a revision — both mean "read the log".
+ */
+async function revisionOf(persistence: SessionPersistenceFace, id: string): Promise<string | undefined> {
+  if (typeof persistence.stat !== 'function') return undefined
+  try {
+    const snapshot = await persistence.stat(id)
+    const revision = snapshot?.revision
+    return typeof revision === 'string' && revision !== '' ? revision : undefined
+  } catch {
+    // A failed stat must not fail the read; it only costs us the cache.
+    return undefined
+  }
 }
 
 export async function fetchUsage(persistence: SessionPersistenceFace | undefined, nowMs = Date.now()): Promise<UsageResponse> {
@@ -462,24 +602,34 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
     if (time > session.lastActive) session.lastActive = time
   }
 
-  const sessionIds = headers
-    .map(header => header.id ?? header.sessionId ?? header.header?.id ?? header.header?.sessionId)
-    .filter((sid): sid is string => sid !== undefined && sid !== '')
-  coverage.listedSessions = sessionIds.length
+  const entries = sessionEntries(headers)
+  coverage.listedSessions = entries.length
+  const liveSessionIds = new Set<string>()
 
-  for (const sid of sessionIds) {
+  for (const entry of entries) {
+    liveSessionIds.add(entry.id)
     try {
-      const events = await readSessionEvents(persistence, sid)
+      const fold = await foldOf(persistence, entry)
       coverage.scannedSessions += 1
-      const session: SessionCost = { id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }
-      const windowSessions = windowAggregates.map((): SessionCost => ({ id: sid, title: '', total: 0, cost: 0, calls: 0, lastActive: 0 }))
-      const sessionVision: VisionAcc & { title: string } = { ...emptyVision(), title: '' }
-      const windowVisionSessions = windowAggregates.map((): VisionAcc & { title: string } => ({ ...emptyVision(), title: '' }))
-      const scanned = addUsageEvent(events, (time, input, output, cache, reasoning, provider, model, messageId, _turn, images) => {
-        // Sub-agent sessions replay the parent session's events verbatim, so
-        // the same messageId shows up in several logs; count each one once.
+      // The session's own title, folded from its log; `session/title` events
+      // are append-only and the last one wins. Readable fallback keeps the
+      // ranking readable for a log that never set one.
+      const title = fold.title !== '' ? fold.title : `会话 ${entry.id.slice(0, 8)}`
+      const session: SessionCost = { id: entry.id, title, total: 0, cost: 0, calls: 0, lastActive: 0 }
+      const windowSessions = windowAggregates.map((): SessionCost => ({ id: entry.id, title, total: 0, cost: 0, calls: 0, lastActive: 0 }))
+      const sessionVision: VisionAcc & { title: string } = { ...emptyVision(), title }
+      const windowVisionSessions = windowAggregates.map((): VisionAcc & { title: string } => ({ ...emptyVision(), title }))
+      coverage.usageRecords += fold.usageRecords
+      coverage.skippedRecords += fold.skippedRecords
+
+      for (const record of fold.records) {
+        const { time, provider, model, input, output, cache, reasoning, messageId } = record
+        // A subagent session is seeded with its ancestor's event prefix, so one
+        // billed call is present in several logs; count each one once. Sessions
+        // are scanned ancestor-first (see sessionEntries), so the copy credited
+        // is the one from the session that actually made the call.
         if (messageId !== undefined) {
-          if (seenMessageIds.has(messageId)) return
+          if (seenMessageIds.has(messageId)) continue
           seenMessageIds.add(messageId)
         }
         if (coverage.earliestAt === null || time < coverage.earliestAt) coverage.earliestAt = time
@@ -496,29 +646,23 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
         bumpModel(modelTotals, modelDays, modelHours, modelKey, dayKey, hourKey, input, output, cache, cost)
         bumpOverall(overall, input, output, cache, reasoning, cost, cacheSavings)
         bumpSession(session, time, eventTotal, cost)
-        // Image blocks ride the record that consumed them: estimated tokens
-        // (official resizing rule) priced at that call's cache-miss input rate.
-        if (images.length > 0) {
-          let imageTokensSum = 0
-          let imageCostSum = 0
-          let imageBytesSum = 0
-          for (const image of images) {
-            const width = typeof image.width === 'number' ? image.width : 0
-            const height = typeof image.height === 'number' ? image.height : 0
-            const tokens = estimateImageTokens(width, height)
-            imageTokensSum += tokens
-            imageCostSum += costOf(time, model, tokens, 0, 0)
-            imageBytesSum += typeof image.bytes === 'number' ? image.bytes : 0
-          }
-          bumpVisionInto(vision, images.length, imageTokensSum, imageCostSum, imageBytesSum)
-          bumpVisionMap(visionDays, dayKey, images.length, imageTokensSum, imageCostSum, imageBytesSum)
-          bumpVisionInto(sessionVision, images.length, imageTokensSum, imageCostSum, imageBytesSum)
+        // Image tokens ride the record that consumed them: the estimate is
+        // pre-summed in the fold (official resizing rule) and priced here at
+        // that call's cache-miss input rate. Pricing the sum once equals
+        // pricing each image, since the rate is linear in tokens.
+        if (record.images > 0) {
+          const imageTokensSum = record.imageTokens
+          const imageCostSum = costOf(time, model, imageTokensSum, 0, 0)
+          const imageBytesSum = record.imageBytes
+          bumpVisionInto(vision, record.images, imageTokensSum, imageCostSum, imageBytesSum)
+          bumpVisionMap(visionDays, dayKey, record.images, imageTokensSum, imageCostSum, imageBytesSum)
+          bumpVisionInto(sessionVision, record.images, imageTokensSum, imageCostSum, imageBytesSum)
           for (let i = 0; i < windowAggregates.length; i++) {
             const aggregate = windowAggregates[i]
             if (dayKey < aggregate.startKey || dayKey > aggregate.endKey) continue
-            bumpVisionInto(aggregate.vision, images.length, imageTokensSum, imageCostSum, imageBytesSum)
-            bumpVisionMap(aggregate.visionDays, dayKey, images.length, imageTokensSum, imageCostSum, imageBytesSum)
-            bumpVisionInto(windowVisionSessions[i], images.length, imageTokensSum, imageCostSum, imageBytesSum)
+            bumpVisionInto(aggregate.vision, record.images, imageTokensSum, imageCostSum, imageBytesSum)
+            bumpVisionMap(aggregate.visionDays, dayKey, record.images, imageTokensSum, imageCostSum, imageBytesSum)
+            bumpVisionInto(windowVisionSessions[i], record.images, imageTokensSum, imageCostSum, imageBytesSum)
           }
         }
         for (let i = 0; i < windowAggregates.length; i++) {
@@ -534,30 +678,24 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
         window.total += eventTotal
         window.cost += cost
         window.calls += 1
-        peakSplit.peakEraCost += costUnderPeakEra(time, model, input, cache, output)
-        peakSplit.offPeakEraCost += costUnderPeakEra(time, model, input, cache, output, true)
-      })
-      coverage.usageRecords += scanned.usageRecords
-      coverage.skippedRecords += scanned.skippedRecords
+        peakSplit.peakEraCost += costUnderPeakEra(time, model, input, cache, output, false, nowMs)
+        peakSplit.offPeakEraCost += costUnderPeakEra(time, model, input, cache, output, true, nowMs)
+      }
+
       if (session.calls > 0) {
-        const title = titleOf(events, sid)
-        session.title = title
         sessions.push(session)
         for (let i = 0; i < windowAggregates.length; i++) {
           const windowSession = windowSessions[i]
           if (windowSession.calls === 0) continue
-          windowSession.title = title
           windowAggregates[i].sessions.push(windowSession)
         }
       }
       if (sessionVision.images > 0) {
-        sessionVision.title = titleOf(events, sid)
-        visionSessions.set(sid, sessionVision)
+        visionSessions.set(entry.id, sessionVision)
         for (let i = 0; i < windowAggregates.length; i++) {
           const windowVision = windowVisionSessions[i]
           if (windowVision.images === 0) continue
-          windowVision.title = sessionVision.title
-          windowAggregates[i].visionSessions.set(sid, windowVision)
+          windowAggregates[i].visionSessions.set(entry.id, windowVision)
         }
       }
     } catch {
@@ -565,6 +703,8 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
       coverage.failedSessions += 1
     }
   }
+  // Sessions deleted from disk must not keep their folds (and their memory).
+  foldCache.retainOnly(liveSessionIds)
 
   const makeDaily = (map: Map<string, Bucket>, count: number): UsageData['daily'] => {
     const result: UsageData['daily'] = []
@@ -705,6 +845,17 @@ export async function fetchUsage(persistence: SessionPersistenceFace | undefined
  * mount without a TTL memo; the caller is expected to re-fetch whenever the
  * session id it cares about changes.
  */
+/**
+ * Usage for exactly one session — the 「额度」tab's own conversation, as
+ * opposed to `fetchUsage`'s account-wide replay.
+ *
+ * Deliberately not memoized on a TTL: the point of this endpoint is to reflect
+ * the session's live state. Freshness comes from the log's own revision
+ * instead — an appended log changes it and is re-read, an untouched one is
+ * served from the fold cache. That keeps the cost off the hot path (a long
+ * session's log here is 5 MiB compressed / ~17 MiB of events, ~100ms of
+ * decompress + parse) while still never showing a stale transcript tail.
+ */
 export async function fetchSessionUsage(persistence: SessionPersistenceFace | undefined, sessionId: string): Promise<SessionUsageResponse> {
   if (persistence === undefined) return { ok: false, error: '会话持久化服务不可用' }
   if (typeof sessionId !== 'string' || sessionId === '') return { ok: false, error: '缺少会话 id' }
@@ -714,9 +865,16 @@ export async function fetchSessionUsage(persistence: SessionPersistenceFace | un
   // same check is repeated here rather than trusted to the one caller.
   if (!isValidSessionId(sessionId)) return { ok: false, error: '会话 id 格式不合法' }
 
-  let events: SessionEventFace[] | undefined
+  const entry: SessionEntry = {
+    id: sessionId,
+    revision: await revisionOf(persistence, sessionId),
+    delegationDepth: 0,
+    createdAt: 0,
+  }
+
+  let fold: FoldedSession
   try {
-    events = await readSessionEvents(persistence, sessionId)
+    fold = await foldOf(persistence, entry)
   } catch (err) {
     return { ok: false, error: `读取会话日志失败：${errorMessage(err)}` }
   }
@@ -729,7 +887,8 @@ export async function fetchSessionUsage(persistence: SessionPersistenceFace | un
   let lastActive: number | null = null
   const turnTotals = new Map<string, { messageId: string; total: number; cost: number; calls: number }>()
 
-  addUsageEvent(events, (time, input, output, cache, _reasoning, provider, model, messageId, turn) => {
+  for (const record of fold.records) {
+    const { time, provider, model, input, output, cache, messageId, turn } = record
     const modelKey = `${provider}/${model}`
     const eventCost = costOf(time, model, input, cache, output)
     const eventTotal = input + output + cache
@@ -751,7 +910,7 @@ export async function fetchSessionUsage(persistence: SessionPersistenceFace | un
       aggregate.calls += 1
       turnTotals.set(key, aggregate)
     }
-  })
+  }
 
   const models: SessionModelUsage[] = [...modelTotals.entries()]
     .map(([modelKey, bucket]): SessionModelUsage => {
@@ -775,7 +934,7 @@ export async function fetchSessionUsage(persistence: SessionPersistenceFace | un
     ok: true,
     data: {
       sessionId,
-      title: titleOf(events, sessionId),
+      title: fold.title !== '' ? fold.title : `会话 ${sessionId.slice(0, 8)}`,
       total,
       cost,
       calls,

@@ -297,6 +297,39 @@ function Stat(props: { label: string; children: ReactNode }): ReactElement {
   )
 }
 
+/**
+ * The freshness line above the cards — the only thing on the page that ages
+ * without new data arriving. It owns its own clock so the 30s tick re-renders
+ * this span instead of the whole dashboard (the heatmap, every chart and both
+ * rankings rebuild their arrays on render, and none of them care what time the
+ * payload arrived).
+ */
+function SyncStatus(props: { state: SyncState; usageUpdatedAt: number | null }): ReactElement {
+  const { t, locale } = useI18n()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  // A payload that just landed is "just now" even if this span last ticked a
+  // moment before it arrived, so realign the clock with the data.
+  useEffect(() => { setNow(Date.now()) }, [props.usageUpdatedAt])
+  const { usageUpdatedAt } = props
+  return (
+    <span
+      className={`dq-sync dq-sync--${props.state}`}
+      role="status"
+      aria-live="polite"
+      title={usageUpdatedAt === null
+        ? t('status.neverSynced')
+        : t('status.usageTime', { time: new Date(usageUpdatedAt).toLocaleString(locale === 'en' ? 'en-US' : 'zh-CN', { timeZone: 'Asia/Shanghai' }) })}
+    >
+      <span className="dq-sync-dot" aria-hidden="true" />
+      {syncStatusText(props.state, usageUpdatedAt, now, t)}
+    </span>
+  )
+}
+
 function Link(props: { href: string; children: ReactNode }): ReactElement {
   return (
     <a className="dq-link" href={props.href} target="_blank" rel="noreferrer">{props.children}</a>
@@ -947,7 +980,6 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
   const [refreshing, setRefreshing] = useState(false)
   const [usageUpdatedAt, setUsageUpdatedAt] = useState<number | null>(cachedUsageAt)
   const [syncState, setSyncState] = useState<SyncState>(cachedUsageAt === null ? 'syncing' : 'cached')
-  const [freshnessNow, setFreshnessNow] = useState(Date.now())
   const hadDataRef = useRef(cachedBalance !== null || cachedUsage !== null)
   const [widgetOn, setWidgetOn] = useState(widgetVisibleStore.get())
   const [widgetTabIds, setWidgetTabIds] = useState<string[] | null>(widgetTabIdsStore.get())
@@ -1114,7 +1146,6 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
         setUsage(res.data)
         const updatedAt = getCachedUsageAt()
         setUsageUpdatedAt(updatedAt)
-        setFreshnessNow(Date.now())
         setSyncState(updatedAt !== null && updatedAt !== usageAtBefore ? 'fresh' : 'cached')
         hadDataRef.current = true
         return null
@@ -1129,7 +1160,6 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
     if (usageError !== null) {
       const fallbackAt = getCachedUsageAt()
       setUsageUpdatedAt(fallbackAt)
-      setFreshnessNow(Date.now())
       setSyncState(fallbackAt === null ? 'error' : 'fallback')
     }
     if (balanceError !== null && usageError !== null) {
@@ -1198,11 +1228,6 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
     void loadSessionUsage(id, false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sessionId])
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setFreshnessNow(Date.now()), 30_000)
-    return () => window.clearInterval(timer)
-  }, [])
 
   const toggle = (): void => {
     const next = !widgetOn
@@ -1363,17 +1388,7 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
     <div className="dq-balance" ref={rootRef} style={composerSafeAreaStyle}>
       <div className="dq-status-row">
         <div className="dq-status-messages">
-          <span
-            className={`dq-sync dq-sync--${syncState}`}
-            role="status"
-            aria-live="polite"
-            title={usageUpdatedAt === null
-              ? t('status.neverSynced')
-              : t('status.usageTime', { time: new Date(usageUpdatedAt).toLocaleString(locale === 'en' ? 'en-US' : 'zh-CN', { timeZone: 'Asia/Shanghai' }) })}
-          >
-            <span className="dq-sync-dot" aria-hidden="true" />
-            {syncStatusText(syncState, usageUpdatedAt, freshnessNow, t)}
-          </span>
+          <SyncStatus state={syncState} usageUpdatedAt={usageUpdatedAt} />
           {noticeText !== null && <span className="dq-warn">{noticeText}</span>}
           {errorText !== null && <span className="dq-error">{errorText}</span>}
         </div>
@@ -1466,9 +1481,19 @@ export function BalanceDashboard(props: { sessionId?: string; views: Conversatio
             <Stat label={t('balance.todayConsumed')}>
               <div
                 className="dq-stat-value"
-                title={todayConsumedShown == null ? t('balance.todayConsumedEmpty') : t('balance.todayConsumedTitle')}
+                title={todayConsumedShown == null
+                  ? t('balance.todayConsumedEmpty')
+                  : balance?.todayConsumedEstimated === true
+                    ? t('balance.todayConsumedEstimatedTitle')
+                    : t('balance.todayConsumedTitle')}
               >
                 {todayConsumedShown == null ? '—' : `${fmt(todayConsumedShown)} ${primary?.currency ?? ''}`}
+                {/* The baseline comes from the first poll of the day when the
+                    host did not run across midnight, which can understate the
+                    platform figure. Say so instead of presenting it as exact. */}
+                {todayConsumedShown != null && balance?.todayConsumedEstimated === true && (
+                  <span className="dq-stat-note">{t('balance.todayConsumedEstimated')}</span>
+                )}
               </div>
             </Stat>
           </div>

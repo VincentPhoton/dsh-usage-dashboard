@@ -22,6 +22,7 @@ import type { BalanceData, SessionUsageData, UsageData } from '../contract.ts'
 import { getActiveConversationViewId, getMainColumn, getShellFrame, slotBox } from './dom.ts'
 import { localizeApiError, useI18n } from './i18n.tsx'
 import { fmtTurnCost } from './message-cost.tsx'
+import { useVisibleInterval } from './poll.ts'
 import { isBoolean, loadPref, savePref } from './prefs.ts'
 import { lowBalanceStore, quotaViewActiveStore, widgetTabIdsStore, widgetVisibleStore } from './store.ts'
 import type { ConversationViewTab, ConversationViewsSource } from './views.ts'
@@ -146,6 +147,13 @@ export function QuotaWidget(props: {
   const [dragging, setDragging] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragSession | null>(null)
+  // Assigned by the placement effect below, so the fallback poll can be one
+  // stable timer no matter which corner/mode currently owns placement.
+  const placeRef = useRef<(() => void) | null>(null)
+  // Layout can move under the widget with no observer reporting it (the session
+  // header mounting after the overlay is the case that motivated this). The
+  // interval is a slow safety net now, and it stops in a hidden tab.
+  useVisibleInterval(() => placeRef.current?.(), 2000)
 
   // Today's spend comes from the shared usage cache — never fetched on the
   // widget's own poll, since aggregating the session logs takes seconds. A
@@ -174,24 +182,29 @@ export function QuotaWidget(props: {
   // The root-scoped overlay does not receive the session's active view store.
   // Read the host's semantic tablist instead and map its selected button by
   // index to the same live slot ledger used to build that tablist.
+  //
+  // The MutationObserver handles a real tab switch the moment it happens; this
+  // poll only covers a host that marks the selection some other way, so it is
+  // slow and hidden-tab-aware. `useVisibleInterval` keeps the latest closure, so
+  // reading the tab ledger here stays correct without a render-phase ref write.
+  const readActiveView = (): void => {
+    const next = getActiveConversationViewId(getShellFrame(rootRef.current), viewTabs.map(tab => tab.id))
+    setActiveViewId(previous => previous === next ? previous : next)
+  }
+  useVisibleInterval(readActiveView, 3000)
+
   useLayoutEffect(() => {
-    const viewIds = viewTabs.map(tab => tab.id)
-    const read = (): void => {
-      const next = getActiveConversationViewId(getShellFrame(rootRef.current), viewIds)
-      setActiveViewId(previous => previous === next ? previous : next)
-    }
-    read()
+    readActiveView()
     const frame = getShellFrame(rootRef.current)
     let observer: MutationObserver | null = null
     if (frame !== null && typeof MutationObserver === 'function') {
-      observer = new MutationObserver(read)
+      observer = new MutationObserver(readActiveView)
       observer.observe(frame, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-selected'] })
     }
-    const poll = setInterval(read, 1000)
     return () => {
       observer?.disconnect()
-      clearInterval(poll)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, viewTabs])
 
   const load = async (showLoading: boolean, force = false): Promise<void> => {
@@ -202,11 +215,13 @@ export function QuotaWidget(props: {
         setData(res.data)
         setError(null)
       } else {
-        setData(null)
+        // Keep the last known balance on screen: a failed poll is not a reason
+        // to blank a widget that was showing a correct number a minute ago.
+        // The error is surfaced beside it instead (same stale-while-revalidate
+        // rule the dashboard's cards follow).
         setError(res.error ?? '')
       }
     } catch (err) {
-      setData(null)
       setError((err as { message?: string } | null)?.message ?? String(err))
     } finally {
       setLoading(false)
@@ -231,14 +246,21 @@ export function QuotaWidget(props: {
    * so repeated triggers cost one rect read and no re-render.
    */
   useLayoutEffect(() => {
-    if (!visible || quotaViewActive) return
+    if (!visible || quotaViewActive) {
+      placeRef.current = null
+      return
+    }
     const node = rootRef.current
-    if (node === null) return
+    if (node === null) {
+      placeRef.current = null
+      return
+    }
     const place = (): void => {
       if (dragRef.current !== null) return
       const next = cornerPos(corner, node, getBounds(node))
       setPos(prev => (prev !== null && prev.x === next.x && prev.y === next.y ? prev : next))
     }
+    placeRef.current = place
     place()
     const frame = getShellFrame(node)
     let observer: ResizeObserver | null = null
@@ -249,11 +271,10 @@ export function QuotaWidget(props: {
       if (main !== null) observer.observe(main)
     }
     window.addEventListener('resize', place)
-    const poll = setInterval(place, 1000)
     return () => {
+      placeRef.current = null
       observer?.disconnect()
       window.removeEventListener('resize', place)
-      clearInterval(poll)
     }
   }, [visible, quotaViewActive, corner, collapsed])
 
@@ -367,11 +388,13 @@ export function QuotaWidget(props: {
   const primary = data !== null && data.balances.length > 0 ? data.balances[0] : null
   const balanceValue = primary !== null ? Number(primary.total) : Number.NaN
   const low = lowBalance > 0 && Number.isFinite(balanceValue) && balanceValue < lowBalance
+  // Unavailable is a real error; low balance and a stale (failed refresh but
+  // still showing a number) both warn, so the dot never hides either state.
   const dotClass = primary === null
     ? 'dsh-quota-dot dsh-quota-dot--idle'
     : data?.isAvailable === false
       ? 'dsh-quota-dot dsh-quota-dot--error'
-      : low ? 'dsh-quota-dot dsh-quota-dot--warn' : 'dsh-quota-dot'
+      : low || error !== null ? 'dsh-quota-dot dsh-quota-dot--warn' : 'dsh-quota-dot'
 
   // The usage figure can be minutes old (it is only refreshed on demand), so
   // say how old rather than presenting it as live.
@@ -416,6 +439,11 @@ export function QuotaWidget(props: {
             <div className="dsh-quota-row">
               <span className="dsh-quota-label">{t('common.status')}</span>
               <span className="dsh-quota-value dsh-quota-error">{t('common.unavailable')}</span>
+            </div>
+          )}
+          {error !== null && (
+            <div className="dsh-quota-error" title={localizeApiError(error, t, 'error.query')}>
+              {t('widget.staleAfterError')}
             </div>
           )}
         </div>

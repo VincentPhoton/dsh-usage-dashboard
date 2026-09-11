@@ -6,6 +6,7 @@ import {
   V41_FLASH_PRICING_FROM_MS,
   cacheSavingOf,
   costOf,
+  costUnderPeakEra,
   estimateImageTokens,
   isPeak,
   pricingInfo,
@@ -221,4 +222,25 @@ test('the official 2026-09-10 price table is reproduced exactly', () => {
     [0.02, 1, 4],
     [0.15, 4.5, 13.5],
   ])
+})
+
+test('the peak/off-peak counterfactual prices a pro record with today\'s routing', () => {
+  const beforeRouting = atBeijingDate(9, 11, 10) // Friday peak; pro still bills as pro
+  const afterRouting = atBeijingDate(9, 21, 10) // Monday peak; pro is routed to Flash
+  const proInput = [1_000_000, 0, 0] as const
+
+  // Asked from before 09-14, the newest table still charges pro money.
+  assert.deepEqual(ratesAt(beforeRouting, 'deepseek-v4-pro'), { cacheHit: 0.3, input: 9, output: 27 })
+  closeTo(costUnderPeakEra(beforeRouting, 'deepseek-v4-pro', ...proInput, true, beforeRouting), 4.5)
+  // Forced off-peak under that same era: half of peak input.
+  closeTo(costUnderPeakEra(afterRouting, 'deepseek-v4-pro', ...proInput, true, beforeRouting), 4.5)
+  // Asked from on/after 09-14, the same record is quoted at Flash rates even
+  // though the record itself predates the routing — otherwise the "shift work
+  // off-peak" saving would over-state pro work by 4.5x.
+  closeTo(costUnderPeakEra(beforeRouting, 'deepseek-v4-pro', ...proInput, true, afterRouting), 1)
+  // Peak window, current routing: Flash peak input is 2/1M.
+  closeTo(costUnderPeakEra(afterRouting, 'deepseek-v4-pro', ...proInput, false, afterRouting), 2)
+  // A flash record is unaffected by the pro routing either way.
+  closeTo(costUnderPeakEra(beforeRouting, 'deepseek-flash', ...proInput, true, beforeRouting), 1)
+  closeTo(costUnderPeakEra(beforeRouting, 'deepseek-flash', ...proInput, true, afterRouting), 1)
 })

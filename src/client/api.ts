@@ -16,7 +16,17 @@ const USAGE_TTL_MS = 5 * 60_000
 async function getJson<T>(path: string, cache: RequestCache): Promise<T> {
   const res = await fetch(path, { headers: { accept: 'application/json' }, cache })
   if (!res.ok) {
-    return { ok: false, error: `HTTP ${res.status}` } as unknown as T
+    // The host answers a caller mistake with a JSON body carrying a readable
+    // reason (e.g. `会话 id 格式不合法`). Surfacing the bare status instead
+    // would throw that away and show "HTTP 400" to the user.
+    let detail: string | undefined
+    try {
+      const body = await res.json() as { error?: unknown }
+      if (typeof body?.error === 'string' && body.error !== '') detail = body.error
+    } catch {
+      // Not a JSON body — fall back to the status code.
+    }
+    return { ok: false, error: detail ?? `HTTP ${res.status}` } as unknown as T
   }
   return res.json() as Promise<T>
 }
@@ -40,8 +50,9 @@ const usageIsUsable = (res: UsageResponse): boolean => {
     && typeof data.coverage.skippedRecords === 'number'
     && Array.isArray(data.windows) && data.windows.length === USAGE_WINDOW_DAYS.length
     && USAGE_WINDOW_DAYS.every(days => data.windows.some(window => window.days === days))
-    && data.windows.every(window => Array.isArray(window.daily)
-      && Array.isArray(window.hourly) && Array.isArray(window.models) && Array.isArray(window.sessions))
+    && data.windows.every(window => Array.isArray(window.daily) && window.daily.length === window.days
+      && Array.isArray(window.hourly) && window.hourly.length === 24
+      && Array.isArray(window.models) && Array.isArray(window.sessions))
     && data.vision !== undefined && typeof data.vision.images === 'number'
     && typeof data.vision.imageTokens === 'number' && typeof data.vision.cost === 'number'
     && Array.isArray(data.visionDaily) && Array.isArray(data.visionSessions)

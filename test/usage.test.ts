@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { CredentialsFace, SessionEventFace, SessionPersistenceFace } from '../src/context.ts'
 import { isValidSessionId } from '../src/contract.ts'
 import { cacheSavingOf, costOf, costUnderPeakEra, estimateImageTokens } from '../src/pricing.ts'
-import { fetchBalance, fetchSessionUsage, fetchUsage } from '../src/usage.ts'
+import { fetchBalance, clearFoldCache, fetchSessionUsage, fetchUsage } from '../src/usage.ts'
 
 const pad2 = (value: number): string => String(value).padStart(2, '0')
 const dayKey = (time: number): string => {
@@ -74,7 +74,10 @@ test('usage replay aggregates totals, periods, models, sessions, and pricing pro
   assert.ok(response.data)
   const data = response.data
 
-  assert.deepEqual(reads, ['session-one', 'session-two', 'broken'])
+  // Replayed in the deterministic order the endpoint fixes, not the order
+  // `list()` happened to return (the host promises none). Without header
+  // metadata the id is the tie-break, so 'broken' is read first.
+  assert.deepEqual(reads, ['broken', 'session-one', 'session-two'])
   assert.deepEqual({
     input: data.totals.input,
     output: data.totals.output,
@@ -279,7 +282,13 @@ test('subagent replay events are deduped across sessions by message id', async (
     ],
   }
   const persistence: SessionPersistenceFace = {
-    list: async () => [{ id: 'parent' }, { id: 'child' }],
+    // Listed child-first on purpose: `list()` promises no order, so attribution
+    // must come from the header metadata (the child is the depth-1 seed of the
+    // parent) rather than from however the host happened to enumerate them.
+    list: async () => [
+      { id: 'child', delegationDepth: 1, createdAt: 2_000 },
+      { id: 'parent', delegationDepth: 0, createdAt: 1_000 },
+    ],
     readFrom: async (id) => ({ events: logs[id] }),
   }
 
@@ -295,6 +304,48 @@ test('subagent replay events are deduped across sessions by message id', async (
     data.sessions.map(session => ({ id: session.id, calls: session.calls })),
     [{ id: 'parent', calls: 2 }, { id: 'child', calls: 1 }],
   )
+})
+
+test('session attribution does not depend on the order list() returns', async () => {
+  const now = localTime(20, 16)
+  const t1 = localTime(20, 10)
+  const logs: Record<string, SessionEventFace[]> = {
+    ancestor: [
+      { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+      { type: 'assistant/message', time: t1, data: { message: { id: 'shared' }, usage: { inputTokens: 1_000, outputTokens: 100 } } },
+      { type: 'assistant/message', time: t1, data: { message: { id: 'ancestor-only' }, usage: { inputTokens: 300, outputTokens: 30 } } },
+    ],
+    replay: [
+      { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+      { type: 'assistant/message', time: t1, data: { message: { id: 'shared' }, usage: { inputTokens: 1_000, outputTokens: 100 } } },
+      { type: 'assistant/message', time: t1, data: { message: { id: 'replay-only' }, usage: { inputTokens: 500, outputTokens: 50 } } },
+    ],
+  }
+  const run = async (order: Array<'ancestor' | 'replay'>) => {
+    const persistence: SessionPersistenceFace = {
+      list: async () => order.map(id => ({
+        id,
+        delegationDepth: id === 'ancestor' ? 0 : 1,
+        createdAt: id === 'ancestor' ? 1_000 : 2_000,
+      })),
+      readFrom: async (id) => ({ events: logs[id] }),
+    }
+    const response = await fetchUsage(persistence, now)
+    assert.ok(response.data)
+    return {
+      calls: response.data.totals.calls,
+      cost: response.data.totals.cost,
+      sessions: response.data.sessions.map(session => ({ id: session.id, calls: session.calls })),
+    }
+  }
+
+  const listedAncestorFirst = await run(['ancestor', 'replay'])
+  const listedReplayFirst = await run(['replay', 'ancestor'])
+  // The credited session and the dropped one are the same either way; under an
+  // unordered list() the old first-copy-wins rule could swap them per call.
+  assert.deepEqual(listedAncestorFirst, listedReplayFirst)
+  assert.deepEqual(listedAncestorFirst.sessions, [{ id: 'ancestor', calls: 2 }, { id: 'replay', calls: 1 }])
+  assert.equal(listedAncestorFirst.calls, 3)
 })
 
 test('usage replay builds consistent 7, 30, 90, and 365 day windows', async () => {
@@ -327,8 +378,162 @@ test('usage replay builds consistent 7, 30, 90, and 365 day windows', async () =
   assert.equal(response.data.totals.calls, 4)
 })
 
-test('usage replay reports unavailable services and list failures', async () => {
-  assert.deepEqual(await fetchUsage(undefined), {
+test('an unchanged session log is folded once and reused on the next replay', async () => {
+  clearFoldCache()
+  const now = localTime(20, 16)
+  const at = localTime(20, 10)
+  const events: SessionEventFace[] = [
+    { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+    { type: 'assistant/message', time: at, data: { message: { id: 'cache-msg-1' }, usage: { inputTokens: 1_000, outputTokens: 100 } } },
+  ]
+  let reads = 0
+  let revision = 'rev-1'
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ header: { id: 'session-cache-warm', createdAt: 1 }, revision, sizeBytes: 10 }],
+    open: async () => {
+      reads += 1
+      const snapshot = [...events]
+      return {
+        read: async (offset = 0) => ({ events: snapshot.slice(offset) }),
+        close: async () => {},
+      }
+    },
+  }
+
+  const first = await fetchUsage(persistence, now)
+  assert.equal(reads, 1)
+  assert.equal(first.data?.totals.calls, 1)
+
+  // Same revision: the log is known unchanged, so no second read. The response
+  // must still be complete — this is a cache hit, not an empty replay.
+  const second = await fetchUsage(persistence, now)
+  assert.equal(reads, 1, 'an unchanged revision must not be read again')
+  assert.deepEqual(second.data?.totals, first.data?.totals)
+  assert.equal(second.data?.sessionCount, 1)
+
+  // An appended log changes the revision: exactly one more read, and the new
+  // call is included.
+  events.push({
+    type: 'assistant/message',
+    time: localTime(20, 12),
+    data: { message: { id: 'cache-msg-2' }, usage: { inputTokens: 500, outputTokens: 50 } },
+  })
+  revision = 'rev-2'
+  const third = await fetchUsage(persistence, now)
+  assert.equal(reads, 2)
+  assert.equal(third.data?.totals.calls, 2)
+  assert.equal(third.data?.totals.input, 1_500)
+})
+
+test('a host without revisions is re-read instead of served a stale fold', async () => {
+  clearFoldCache()
+  const now = localTime(20, 16)
+  const events: SessionEventFace[] = [
+    { type: 'assistant/message', time: localTime(20, 10), data: { message: { id: 'no-rev-1' }, usage: { inputTokens: 100, outputTokens: 10 } } },
+  ]
+  let reads = 0
+  const persistence: SessionPersistenceFace = {
+    // Legacy shape: no revision anywhere.
+    list: async () => [{ id: 'session-no-revision' }],
+    open: async () => {
+      reads += 1
+      const snapshot = [...events]
+      return { read: async (offset = 0) => ({ events: snapshot.slice(offset) }), close: async () => {} }
+    },
+  }
+
+  await fetchUsage(persistence, now)
+  await fetchUsage(persistence, now)
+  // Caching an entry that could never be validated would risk a stale replay,
+  // so without a revision every call reads the log.
+  assert.equal(reads, 2)
+})
+
+test('a /usage replay warms the single-session endpoint, which re-reads after an append', async () => {
+  clearFoldCache()
+  const now = localTime(20, 16)
+  const events: SessionEventFace[] = [
+    { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+    { type: 'assistant/message', time: localTime(20, 10), data: { message: { id: 'warm-1' }, usage: { inputTokens: 1_000, outputTokens: 100 } } },
+  ]
+  let reads = 0
+  let revision = 'rev-a'
+  let statCalls = 0
+  const persistence: SessionPersistenceFace = {
+    list: async () => [{ header: { id: 'session-warm-shared' }, revision }],
+    stat: async () => {
+      statCalls += 1
+      return { revision }
+    },
+    open: async () => {
+      reads += 1
+      const snapshot = [...events]
+      return { read: async (offset = 0) => ({ events: snapshot.slice(offset) }), close: async () => {} }
+    },
+  }
+
+  const usage = await fetchUsage(persistence, now)
+  assert.equal(reads, 1)
+  assert.equal(usage.data?.totals.calls, 1)
+
+  // The single-session endpoint stats the log, sees the same revision the
+  // account-wide replay cached under, and answers without touching the file.
+  const session = await fetchSessionUsage(persistence, 'session-warm-shared')
+  assert.equal(statCalls, 1)
+  assert.equal(reads, 1, 'the shared fold must be reused across endpoints')
+  assert.equal(session.data?.calls, 1)
+  assert.equal(session.data?.cost, usage.data?.totals.cost)
+
+  // Appending changes the revision, so the next read does happen.
+  events.push({
+    type: 'assistant/message',
+    time: localTime(20, 11),
+    data: { message: { id: 'warm-2' }, usage: { inputTokens: 200, outputTokens: 20 } },
+  })
+  revision = 'rev-b'
+  const grown = await fetchSessionUsage(persistence, 'session-warm-shared')
+  assert.equal(reads, 2)
+  assert.equal(grown.data?.calls, 2)
+})
+
+test('session usage without a stat falls back to reading the log', async () => {
+  clearFoldCache()
+  const events: SessionEventFace[] = [
+    { type: 'assistant/message', time: localTime(20, 10), data: { message: { id: 'nostat-1' }, usage: { inputTokens: 100, outputTokens: 10 } } },
+  ]
+  let reads = 0
+  const persistence: SessionPersistenceFace = {
+    list: async () => [],
+    open: async () => {
+      reads += 1
+      const snapshot = [...events]
+      return { read: async (offset = 0) => ({ events: snapshot.slice(offset) }), close: async () => {} }
+    },
+  }
+  await fetchSessionUsage(persistence, 'session-no-stat')
+  await fetchSessionUsage(persistence, 'session-no-stat')
+  assert.equal(reads, 2)
+})
+
+test('a failed stat only costs the cache, not the read', async () => {
+  clearFoldCache()
+  const events: SessionEventFace[] = [
+    { type: 'assistant/message', time: localTime(20, 10), data: { message: { id: 'statfail-1' }, usage: { inputTokens: 100, outputTokens: 10 } } },
+  ]
+  const persistence: SessionPersistenceFace = {
+    list: async () => [],
+    stat: async () => { throw new Error('stat unavailable') },
+    open: async () => {
+      const snapshot = [...events]
+      return { read: async (offset = 0) => ({ events: snapshot.slice(offset) }), close: async () => {} }
+    },
+  }
+  const response = await fetchSessionUsage(persistence, 'session-stat-fails')
+  assert.equal(response.ok, true)
+  assert.equal(response.data?.calls, 1)
+})
+
+test('usage replay reports unavailable services and list failures', async () => {  assert.deepEqual(await fetchUsage(undefined), {
     ok: false,
     error: '会话持久化服务不可用',
   })
@@ -382,6 +587,8 @@ test('balance fetch resolves credentials and maps the DeepSeek response', async 
         toppedUp: '40.00',
       }],
       todayConsumed: null,
+      // Seeded from this poll, because nothing was observed near midnight.
+      todayConsumedEstimated: true,
     },
   })
 })
@@ -389,8 +596,17 @@ test('balance fetch resolves credentials and maps the DeepSeek response', async 
 test('balance delta tracker reports platform-accounted daily consumption', async () => {
   const statePath = join(tmpdir(), `dsh-usage-dashboard-delta-${process.pid}-${Date.now()}.json`)
   const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10)
-  // Seed a day-start baseline: total 100, toppedUp 50.
-  writeFileSync(statePath, JSON.stringify({ date: today, total: 100, toppedUp: 50 }), 'utf8')
+  // Seed a day-start baseline: total 100, toppedUp 50, observed near midnight
+  // (so the day's figure is exact, not estimated).
+  writeFileSync(statePath, JSON.stringify({
+    date: today,
+    total: 100,
+    toppedUp: 50,
+    estimatedBaseline: false,
+    sampleAt: Date.now() - 60_000,
+    sampleTotal: 100,
+    sampleToppedUp: 50,
+  }), 'utf8')
 
   const credentials: CredentialsFace = { resolve: async () => ({ value: 'test-key', source: 'test' }) }
   const withBalances = (total: string, toppedUp: string) => {
@@ -402,7 +618,10 @@ test('balance delta tracker reports platform-accounted daily consumption', async
 
   // Balance dropped by 10 and a 10 top-up landed → consumed = 100 - 90 + (60 - 50) = 20.
   withBalances('90.00', '60.00')
-  assert.deepEqual((await fetchBalance(credentials, statePath)).data?.todayConsumed, 20)
+  const consumed = await fetchBalance(credentials, statePath)
+  assert.deepEqual(consumed.data?.todayConsumed, 20)
+  // A baseline observed near midnight is exact; only a seeded one is estimated.
+  assert.equal(consumed.data?.todayConsumedEstimated, false)
 
   // Balance unchanged since the baseline → nothing consumed.
   withBalances('100.00', '50.00')
@@ -455,8 +674,64 @@ test('balance delta tracker re-baselines on the first poll of a new Beijing day'
   t.after(() => { globalThis.fetch = originalFetch })
 
   const statePath = join(tmpdir(), `dsh-usage-dashboard-rollover-${process.pid}-${Date.now()}.json`)
-  const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10)
-  // A 24h shift always lands on the previous Beijing calendar day.
+  // Beijing day boundaries, so the test does not depend on when it runs.
+  const BEIJING_OFFSET_MS = 8 * 3_600_000
+  const dayStart = Math.floor((Date.now() + BEIJING_OFFSET_MS) / 86_400_000) * 86_400_000 - BEIJING_OFFSET_MS
+  const today = new Date(dayStart + BEIJING_OFFSET_MS).toISOString().slice(0, 10)
+  const yesterday = new Date(dayStart - 86_400_000 + BEIJING_OFFSET_MS).toISOString().slice(0, 10)
+  const credentials: CredentialsFace = { resolve: async () => ({ value: 'test-key', source: 'test' }) }
+  const respondWith = (total: string) => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      is_available: true,
+      balance_infos: [{ currency: 'CNY', total_balance: total, granted_balance: '0', topped_up_balance: '40.00' }],
+    }), { status: 200 })) as typeof fetch
+  }
+
+  try {
+    // The machine ran until just before midnight, then slept: yesterday's last
+    // observation (100) is 10 minutes before the day boundary, which is close
+    // enough to serve as today's baseline — so spend that lands overnight is
+    // still attributed to today instead of vanishing into the sleep gap.
+    // `estimatedBaseline: true` on the old entry proves the rollover recomputes
+    // the flag from the sample rather than inheriting it.
+    writeFileSync(statePath, JSON.stringify({
+      date: yesterday,
+      total: 100,
+      toppedUp: 40,
+      estimatedBaseline: true,
+      sampleAt: dayStart - 10 * 60_000,
+      sampleTotal: 100,
+      sampleToppedUp: 40,
+    }), 'utf8')
+
+    // First poll after midnight: no number for the new day yet — and the
+    // baseline is rewritten to today from the pre-midnight sample.
+    respondWith('90.00')
+    const first = await fetchBalance(credentials, statePath)
+    assert.equal(first.data?.todayConsumed, null)
+    const rolled = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown>
+    assert.equal(rolled.date, today)
+    assert.equal(rolled.total, 100)
+    assert.equal(rolled.toppedUp, 40)
+    assert.equal(rolled.estimatedBaseline, false)
+    assert.equal(rolled.sampleTotal, 90)
+
+    // The next poll accounts against the pre-midnight baseline: 100 → 85 is
+    // today's business, including the part that happened while asleep.
+    respondWith('85.00')
+    const next = await fetchBalance(credentials, statePath)
+    assert.deepEqual(next.data?.todayConsumed, 15)
+    assert.equal(next.data?.todayConsumedEstimated, false)
+  } finally {
+    rmSync(statePath, { force: true })
+  }
+})
+
+test('balance delta tracker flags a baseline seeded after a long sleep', async t => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const statePath = join(tmpdir(), `dsh-usage-dashboard-stale-${process.pid}-${Date.now()}.json`)
   const yesterday = new Date(Date.now() - 86_400_000 + 8 * 3_600_000).toISOString().slice(0, 10)
   const credentials: CredentialsFace = { resolve: async () => ({ value: 'test-key', source: 'test' }) }
   const respondWith = (total: string) => {
@@ -467,20 +742,62 @@ test('balance delta tracker re-baselines on the first poll of a new Beijing day'
   }
 
   try {
-    // The service kept running overnight: yesterday's baseline is still on
-    // disk when the first poll of the new day arrives.
-    writeFileSync(statePath, JSON.stringify({ date: yesterday, total: 100, toppedUp: 40 }), 'utf8')
+    // Yesterday's only observation is from the previous afternoon — hours
+    // before midnight. It says nothing about the balance at the boundary, so
+    // it must NOT be used as today's baseline: the evening could have been
+    // busy, and folding that spend into today would be worse than the gap.
+    writeFileSync(statePath, JSON.stringify({
+      date: yesterday,
+      total: 100,
+      toppedUp: 40,
+      estimatedBaseline: false,
+      sampleAt: Date.now() - 86_400_000 - 6 * 3_600_000,
+      sampleTotal: 100,
+      sampleToppedUp: 40,
+    }), 'utf8')
 
-    // First poll after midnight: no number for the new day yet — and the
-    // baseline on disk is rewritten to today, so no restart is needed.
+    // First poll today seeds from the poll itself and flags the day estimated.
     respondWith('90.00')
-    assert.equal((await fetchBalance(credentials, statePath)).data?.todayConsumed, null)
-    assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), { date: today, total: 90, toppedUp: 40 })
+    const first = await fetchBalance(credentials, statePath)
+    assert.equal(first.data?.todayConsumed, null)
+    assert.equal(first.data?.todayConsumedEstimated, true)
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).total, 90)
 
-    // The next poll accounts against the NEW baseline (100 → 90 was
-    // yesterday's business; 90 → 85 belongs to today).
+    // Later polls stay flagged for the rest of the day, so the UI can say so.
     respondWith('85.00')
-    assert.deepEqual((await fetchBalance(credentials, statePath)).data?.todayConsumed, 5)
+    const next = await fetchBalance(credentials, statePath)
+    assert.deepEqual(next.data?.todayConsumed, 5)
+    assert.equal(next.data?.todayConsumedEstimated, true)
+  } finally {
+    rmSync(statePath, { force: true })
+  }
+})
+
+test('balance delta tracker treats a legacy or corrupt state file as no baseline', async t => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const statePath = join(tmpdir(), `dsh-usage-dashboard-legacy-${process.pid}-${Date.now()}.json`)
+  const today = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10)
+  const credentials: CredentialsFace = { resolve: async () => ({ value: 'test-key', source: 'test' }) }
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    is_available: true,
+    balance_infos: [{ currency: 'CNY', total_balance: '90.00', granted_balance: '0', topped_up_balance: '40.00' }],
+  }), { status: 200 })) as typeof fetch
+
+  try {
+    // The pre-improvement shape has no sample fields, so it cannot be trusted
+    // as a baseline — it is re-seeded instead of being read as if it were one.
+    writeFileSync(statePath, JSON.stringify({ date: today, total: 100, toppedUp: 40 }), 'utf8')
+    const legacy = await fetchBalance(credentials, statePath)
+    assert.equal(legacy.data?.todayConsumed, null)
+    assert.equal(legacy.data?.todayConsumedEstimated, true)
+    assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).total, 90)
+
+    writeFileSync(statePath, '{ not json', 'utf8')
+    const corrupt = await fetchBalance(credentials, statePath)
+    assert.equal(corrupt.data?.todayConsumed, null)
+    assert.equal(corrupt.data?.todayConsumedEstimated, true)
   } finally {
     rmSync(statePath, { force: true })
   }

@@ -265,10 +265,26 @@ export function costOf(timeMs: number, model: string, input: number, cache: numb
  * answer "what would shifting work off-peak save me". Prices come from the
  * newest table, the one in force now: the question is about scheduling the
  * next batch, not about re-pricing history.
+ *
+ * The *tier* is likewise resolved as of now, not as of the record: from
+ * 2026-09-14 a `deepseek-v4-pro` request is served by V4.1-Flash and billed at
+ * Flash rates, so a pro record written before that date would be 4.5x
+ * over-priced if the routing were read off the record's own timestamp. Only
+ * the peak/off-peak question ("would this record have landed in a peak
+ * window?") is asked of the record's own time, which is why `timeMs` is still
+ * needed here.
  */
-export function costUnderPeakEra(timeMs: number, model: string, input: number, cache: number, output: number, forceOffPeak = false): number {
+export function costUnderPeakEra(
+  timeMs: number,
+  model: string,
+  input: number,
+  cache: number,
+  output: number,
+  forceOffPeak = false,
+  nowMs = Date.now(),
+): number {
   const current = PRICE_ERAS[PRICE_ERAS.length - 1]
-  const peak = current.peak[billedTierOf(timeMs, model)]
+  const peak = current.peak[billedTierOf(nowMs, model)]
   const rates = !forceOffPeak && isPeak(timeMs) ? peak : halved(peak, current.halveCacheHit)
   return applyRates(rates, input, cache, output)
 }

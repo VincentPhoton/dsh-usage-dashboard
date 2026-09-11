@@ -298,7 +298,7 @@ p.dq-session-sub{margin:8px 0}
    case is the font-size drop below, which keeps every measured stress value comfortably under the
    83px column width without ever hitting the ellipsis fallback (see round 38 PROGRESS entry) */
 .dq-usage-totals .dq-stat-value{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dq-vision-share{display:inline-block;margin-left:6px;font-size:11px;font-weight:550;color:var(--dsw-alias-label-tertiary,#59636e)}
+.dq-stat-note,.dq-vision-share{display:inline-block;margin-left:6px;font-size:11px;font-weight:550;color:var(--dsw-alias-label-tertiary,#59636e)}
 .dq-vision-sessions{margin-top:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
 /* The vision card's session rows reuse .dq-session-head, but — unlike the
    ranking card's rows — they sit directly under .dq-session with no

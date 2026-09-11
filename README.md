@@ -283,6 +283,12 @@ This fork includes the following changes on top of upstream `c94632e`
   按 `GET /user/balance` 的余额差值法核算今日消耗，已按平台数据播种基准
   （当日的「今晨余额 + 当日充值 − 当前余额」，具体数值已脱敏）。**这是与平台数据对账的真相源。**
 
+- **`perf+fix: revision 增量折叠缓存 + 归属确定化 + 跨午夜基线`** —
+  `/usage` 命中缓存时读盘从 12 次降到 0 次（177ms → 4ms），`/session` 复用同一份折叠结果（3ms → 0ms）；
+  跨会话 `messageId` 去重不再依赖宿主 `list()` 顺序（官方文档明确不保证顺序）；
+  峰谷反事实按"现在"的 pro→flash 路由求值；「今日消耗」跨午夜改用午夜前样本做基线并标「估算」。
+  实测输出（calls / 金额 / 记录数 / 响应体）与改动前**逐字节一致**。详见《修正记录.md》§九。
+
 ### 🧹 Chore
 
 - **`chore: 提交构建产物 lib/，使 fork 可被 file: 依赖直接安装`**
@@ -299,7 +305,7 @@ This fork includes the following changes on top of upstream `c94632e`
 
 ### 📊 Test coverage
 
-新增 85 例测试（cache 3 + usage 2 + pricing 14 + usage 40 + 用量 26），总计 62/62 通过。
+本 fork 维护的用例总数：**89/89 通过**（`node test/run.mjs`）。
 
 ### 🔗 Fork metadata
 

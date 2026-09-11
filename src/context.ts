@@ -24,13 +24,42 @@ export interface CredentialsFace {
   resolve(ref: string): Promise<{ value: string; source: string } | undefined>
 }
 
-/** Structural face of the `sessionPersistence` service. */
+/** Structural face of the `sessionPersistence` service.
+ *
+ *  Field set is a superset of both generations of `list()` entries: legacy
+ *  hosts returned the header fields at the entry top, the snapshot-era host
+ *  returns `{ header, revision, sizeBytes }`. Only the fields this plugin
+ *  reads are declared. */
 export interface SessionHeaderFace {
   id?: string
   sessionId?: string
   /** Handle-era `list()` returns snapshots; the header (and its id) rides
    *  one level deeper at `snapshot.header.id` instead of at the entry top. */
   header?: SessionHeaderFace
+  /** Unix epoch milliseconds the session was created, when the host exposes it. */
+  createdAt?: number
+  /** Delegation depth: absent/0 for a top-level session, parent depth + 1 for a
+   *  subagent child. Reads as an *inheritance* axis: a child session is seeded
+   *  with its ancestor's event prefix, so for one event id the lowest-depth
+   *  copy is the originating session and every deeper copy is a replay. */
+  delegationDepth?: number
+  /** Whether this session carries a fork-inherited event prefix. */
+  isSeeded?: boolean
+  /** Snapshot-era opaque change token (see {@link SessionSnapshotFace}). */
+  revision?: string
+  /** Snapshot-era physical artifact size in bytes. */
+  sizeBytes?: number
+}
+
+/**
+ * One `list()`/`stat()` observation. `revision` is an opaque change token that
+ * may be compared for equality against the same session id from the same
+ * service instance: equal revisions promise an unchanged log, so a cached fold
+ * can be reused without reading the file again. Anything else must be re-read.
+ */
+export interface SessionSnapshotFace {
+  revision?: string
+  sizeBytes?: number
 }
 
 export interface TokenUsageFace {
@@ -92,6 +121,9 @@ export interface SessionPersistenceFace {
   readFrom?(id: string, fromSeq: number): Promise<{ events?: SessionEventFace[] }>
   /** Handle-era hosts: per-session read handle, preferred when present. */
   open?(id: string, access: 'read'): Promise<SessionHandleFace>
+  /** Metadata-only observation of one session, used to decide whether a cached
+   *  fold is still valid. Optional: without it the plugin simply re-reads. */
+  stat?(id: string): Promise<SessionSnapshotFace | undefined>
 }
 
 /** The host context this plugin's apply() receives. */
