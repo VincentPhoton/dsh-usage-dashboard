@@ -10,3 +10,44 @@ lib/
 
 # DSH 会话运行时数据(Mnemon 记忆投影),不属于插件仓库
 .mnemon/
+
+# === 敏感排除（硬规则：.env / mnemon / logs / 密钥 / 本机私有目录一律不入库）===
+# 由 ~/.githooks/ensure-ignore.sh 维护；守卫 ~/.githooks/{pre-commit,pre-push} 会强制拦截
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+credentials.json
+auth.json
+token.json
+.netrc
+.npmrc
+.git-credentials
+mnemon/
+logs/
+log/
+*.db
+*.sqlite
+*.sqlite3
+!test/**/*.db
+!tests/**/*.db
+!fixtures/**/*.db
+!testdata/**/*.db
+secrets/
+.dsh/
+.ssh/
+.aws/
+.gnupg/
+.kube/
+.terraform/
+*.tfstate
+*.tfstate.*
