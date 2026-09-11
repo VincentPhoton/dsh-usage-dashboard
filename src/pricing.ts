@@ -11,12 +11,14 @@
  * - 2026-09-14 12:00: `deepseek-v4-pro` requests are served by V4.1-Flash and
  *   billed at Flash rates until a V4.1 Pro ships.
  *
- * Peak windows are Beijing time 09:00–12:00 and 14:00–18:00. Weekends (Sat/Sun)
- * and Chinese statutory holidays (法定节假日) are entirely off-peak — verified
- * against the Open Platform bill for 2026-08-22, a Saturday inside the era the
- * announcement still described as "every day". Off-peak halves input/output
- * only; the cache-hit rate is the same in both windows (see halved()), which is
- * what makes these estimates line up with the platform bill.
+ * Peak windows are Beijing time 09:00–12:00 and 14:00–18:00 on Monday–Friday.
+ * Weekends (Sat/Sun) and Chinese statutory holidays (法定节假日) are entirely
+ * off-peak; the weekend half was verified against the Open Platform bill for
+ * 2026-08-22, a Saturday. From the 2026-09-10 era on, off-peak is exactly half
+ * of peak for every component, cache-hit included, as the official price page
+ * states ("空闲时段价格为高峰时段价格的一半"). The 2026-08-17 era is the one
+ * exception, where the actual bill only matched with an un-halved cache-hit
+ * rate — see PriceEra.halveCacheHit.
  *
  * `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are legacy names for
  * the model now published as `deepseek-flash`; both keep billing at Flash
@@ -57,10 +59,9 @@ const FLAT_RATES: Record<Tier, PricingRates> = {
   vision: { cacheHit: 0.02, input: 1, output: 2 },
 }
 
-/** Peak rates from 2026-08-17; off-peak halves input/output only — the
- *  cache-hit rate is the same in both windows (verified against the Open
- *  Platform bill: the off-peak total only matches when the cache-hit rate
- *  stays at its peak value). */
+/** Peak rates from 2026-08-17. That era is the exception to "off-peak is half
+ *  of peak": the Open Platform bill only matched when the cache-hit rate stayed
+ *  at its peak value, hence `halveCacheHit: false` below. */
 const PEAK_RATES_08_17: Record<Tier, PricingRates> = {
   pro: { cacheHit: 0.3, input: 9, output: 27 },
   flash: { cacheHit: 0.1, input: 3, output: 9 },
@@ -69,7 +70,10 @@ const PEAK_RATES_08_17: Record<Tier, PricingRates> = {
   vision: { cacheHit: 0.1, input: 3, output: 9 },
 }
 
-/** Peak rates from 2026-09-10, the V4.1-Flash table; off-peak is half. */
+/** Peak rates from 2026-09-10, the V4.1-Flash table (flash peak 0.04/2/8).
+ *  Official rule: off-peak is half of peak for every component, so flash
+ *  off-peak is 0.02/1/4 and pro off-peak 0.15/4.5/13.5 — the exact rows the
+ *  official price page lists. */
 const PEAK_RATES_09_10: Record<Tier, PricingRates> = {
   pro: { cacheHit: 0.3, input: 9, output: 27 },
   flash: { cacheHit: 0.04, input: 2, output: 8 },
@@ -82,12 +86,19 @@ interface PriceEra {
   readonly peak: Record<Tier, PricingRates>
   /** Whether the peak windows apply Monday–Friday only. */
   readonly weekdaysOnly: boolean
+  /**
+   * Whether the off-peak window halves the cache-hit rate as well. Official
+   * rule since 2026-09-10: "空闲时段价格为高峰时段价格的一半" — every component,
+   * cache-hit included. The 2026-08-17 era is the exception: its actual bill
+   * only matched with an un-halved cache-hit rate.
+   */
+  readonly halveCacheHit: boolean
 }
 
 /** Oldest first — the last entry whose `fromMs` has passed is the one in force. */
 const PRICE_ERAS: readonly PriceEra[] = [
-  { fromMs: PEAK_PRICING_FROM_MS, peak: PEAK_RATES_08_17, weekdaysOnly: false },
-  { fromMs: V41_FLASH_PRICING_FROM_MS, peak: PEAK_RATES_09_10, weekdaysOnly: true },
+  { fromMs: PEAK_PRICING_FROM_MS, peak: PEAK_RATES_08_17, weekdaysOnly: false, halveCacheHit: false },
+  { fromMs: V41_FLASH_PRICING_FROM_MS, peak: PEAK_RATES_09_10, weekdaysOnly: true, halveCacheHit: true },
 ]
 
 /** The price table in force at a moment. */
@@ -97,9 +108,10 @@ function eraAt(timeMs: number): PriceEra {
   return era
 }
 
-/** Off-peak = peak with input/output halved; cache-hit price is unchanged. */
-const halved = (rates: PricingRates): PricingRates => ({
-  cacheHit: rates.cacheHit,
+/** Off-peak rates for one era: every component halves, unless the era is the
+ *  2026-08-17 one whose bill matched only with an un-halved cache-hit rate. */
+const halved = (rates: PricingRates, halveCacheHit = true): PricingRates => ({
+  cacheHit: halveCacheHit ? rates.cacheHit / 2 : rates.cacheHit,
   input: rates.input / 2,
   output: rates.output / 2,
 })
@@ -226,8 +238,9 @@ function isChineseHoliday(timeMs: number): boolean {
 /** Rates applying to one model at one moment. */
 export function ratesAt(timeMs: number, model: string): PricingRates {
   if (timeMs < PEAK_PRICING_FROM_MS) return FLAT_RATES[tierOf(model)]
-  const peak = eraAt(timeMs).peak[billedTierOf(timeMs, model)]
-  return isPeak(timeMs) ? peak : halved(peak)
+  const era = eraAt(timeMs)
+  const peak = era.peak[billedTierOf(timeMs, model)]
+  return isPeak(timeMs) ? peak : halved(peak, era.halveCacheHit)
 }
 
 /**
@@ -254,8 +267,9 @@ export function costOf(timeMs: number, model: string, input: number, cache: numb
  * next batch, not about re-pricing history.
  */
 export function costUnderPeakEra(timeMs: number, model: string, input: number, cache: number, output: number, forceOffPeak = false): number {
-  const peak = PRICE_ERAS[PRICE_ERAS.length - 1].peak[billedTierOf(timeMs, model)]
-  const rates = !forceOffPeak && isPeak(timeMs) ? peak : halved(peak)
+  const current = PRICE_ERAS[PRICE_ERAS.length - 1]
+  const peak = current.peak[billedTierOf(timeMs, model)]
+  const rates = !forceOffPeak && isPeak(timeMs) ? peak : halved(peak, current.halveCacheHit)
   return applyRates(rates, input, cache, output)
 }
 
@@ -264,7 +278,7 @@ export function costUnderPeakEra(timeMs: number, model: string, input: number, c
  *  the pro routing live in the small print next to the table. */
 export function pricingInfo(nowMs: number): PricingInfo {
   const era = eraAt(nowMs)
-  const row = (model: string, tier: Tier) => ({ model, peak: era.peak[tier], offPeak: halved(era.peak[tier]) })
+  const row = (model: string, tier: Tier) => ({ model, peak: era.peak[tier], offPeak: halved(era.peak[tier], era.halveCacheHit) })
   return {
     currency: 'CNY',
     switchDate: '2026-08-17',

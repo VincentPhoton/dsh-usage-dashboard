@@ -187,7 +187,7 @@ dsh plugin --profile web add ./path/to/dsh-usage-dashboard
 费用是**估算**，不是账单。规则都在 [`src/pricing.ts`](src/pricing.ts) 一个文件里：
 
 - 逐条用量记录按「**模型** + **是否落在高峰时段** + **当时的价目表**」计价，而不是全局一套价。
-- 2026-08-17 00:00（北京时间）之前按旧的固定价；之后按峰谷价：闲时 **input/output 为高峰的一半，缓存命中价不变**（已按开放平台实际账单核对——这一点是本 fork 与官方 0.5/0.6 的口径差异）。
+- 2026-08-17 00:00（北京时间）之前按旧的固定价；之后按峰谷价。**2026-09-10 12:00 起空闲时段价格 = 高峰时段价格的一半（含缓存命中价）**，与[官方价格页](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)逐行一致；08-17–09-10 这一段历史用量保留本 fork 当时按实际账单核对出的口径（仅 input/output 半价，缓存命中价不减半）。
 - 2026-09-10 12:00 起 Flash 系列降价（V4.1-Flash）；2026-09-14 12:00 起 `deepseek-v4-pro` 的请求由 V4.1-Flash 承接，按 Flash 价计费。
 - 高峰时段按**北京时间**判定，不随机器时区漂移；且**仅限工作日**——周六、周日和法定节假日全天都是闲时（法定节假日表在 [`src/pricing.ts`](src/pricing.ts) 的 `CN_HOLIDAYS`，国务院每年公布后需补充新年度）。
 - 用量按 messageId 跨会话去重（子代理会话会回放父会话的同一批事件，不去重会重复计数）。
@@ -197,10 +197,10 @@ dsh plugin --profile web add ./path/to/dsh-usage-dashboard
 
 | 模型 | 时段 | 输入·缓存命中 | 输入·未命中 | 输出 |
 |---|---|---|---|---|
-| deepseek-flash | 高峰 / 闲时 | 0.04 / 0.04 | 2 / 1 | 8 / 4 |
-| deepseek-v4-pro | 高峰 / 闲时 | 0.3 / 0.3 | 9 / 4.5 | 27 / 13.5 |
+| deepseek-flash | 高峰 / 闲时 | 0.04 / 0.02 | 2 / 1 | 8 / 4 |
+| deepseek-v4-pro | 高峰 / 闲时 | 0.3 / 0.15 | 9 / 4.5 | 27 / 13.5 |
 
-`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 是旧模型名，现由 `deepseek-flash` 承接、按 Flash 价计费；2026-09-14 12:00 起 `deepseek-v4-pro` 的请求也路由到 V4.1-Flash，按 Flash 价计费。历史各时期单价：08-17 前 pro 0.025/3/6、flash 0.02/1/2；08-17 – 09-10 12:00 的 flash 高峰 0.1/3/9、闲时 0.1/1.5/4.5。
+`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 是旧模型名，现由 `deepseek-flash` 承接、按 Flash 价计费；2026-09-14 12:00 起 `deepseek-v4-pro` 的请求也路由到 V4.1-Flash，按 Flash 价计费。历史各时期单价：08-17 前 pro 0.025/3/6、flash 0.02/1/2；08-17 – 09-10 12:00 的 flash 高峰 0.1/3/9、闲时 0.1/1.5/4.5（该段是本 fork 按实际账单核对出的口径；官方该期闲时表为 0.05/1.5/4.5）。
 
 图片不另外收费，而是按尺寸折算成 token 与文本一并计费：官方规则是先把图片按比例缩放到 ~800×800（小于 ~384×384 的放大），token 与缩放后面积成正比、每张上限 384 tokens。多模态卡的估算就套这条规则。
 
